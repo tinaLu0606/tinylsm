@@ -1,0 +1,77 @@
+{
+  "version": 5,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "base",
+      "hidden": true,
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_EXPORT_COMPILE_COMMANDS": true,
+        "BUILD_TESTING": true,
+        "TINYLSM_BUILD_TOOLS": true
+      }
+    },
+    {
+      "name": "dev-debug",
+      "displayName": "Developer Debug",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug"
+      }
+    },
+    {
+      "name": "dev-asan-ubsan",
+      "displayName": "Developer ASan + UBSan",
+      "inherits": "dev-debug",
+      "cacheVariables": {
+        "TINYLSM_ENABLE_ASAN": true,
+        "TINYLSM_ENABLE_UBSAN": true
+      }
+    },
+    {
+      "name": "release",
+      "displayName": "Release",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": false
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev-debug",
+      "configurePreset": "dev-debug"
+    },
+    {
+      "name": "dev-asan-ubsan",
+      "configurePreset": "dev-asan-ubsan"
+    },
+    {
+      "name": "release",
+      "configurePreset": "release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "dev-debug",
+      "configurePreset": "dev-debug",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "dev-asan-ubsan",
+      "configurePreset": "dev-asan-ubsan",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

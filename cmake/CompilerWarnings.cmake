@@ -1,0 +1,10 @@
+include_guard(GLOBAL)
+
+function(tinylsm_set_warnings target)
+  if(CMAKE_CXX_COMPILER_ID MATCHES "AppleClang|Clang|GNU")
+    target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+    if(TINYLSM_WARNINGS_AS_ERRORS)
+      target_compile_options(${target} PRIVATE -Werror)
+    endif()
+  endif()
+endfunction()

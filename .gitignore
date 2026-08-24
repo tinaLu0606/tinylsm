@@ -1,0 +1,24 @@
+# macOS
+.DS_Store
+
+# CMake build outputs
+/build/
+/cmake-build-*/
+/out/
+CMakeCache.txt
+CMakeFiles/
+compile_commands.json
+CTestTestfile.cmake
+cmake_install.cmake
+build.ninja
+.ninja_deps
+.ninja_log
+
+# Compiler and sanitizer artifacts
+*.dSYM/
+*.profraw
+*.profdata
+*.sst.tmp
+
+# Local caches
+/.cache/

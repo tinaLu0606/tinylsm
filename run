@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly TINYLSM_SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "${TINYLSM_SCRIPT_DIR}/scripts/common.sh"
+
+usage() {
+  cat <<'EOF'
+Usage: ./run <command> [arguments]
+
+Commands:
+  configure [preset]   Configure the project (default: dev-debug)
+  build [preset]       Configure and build the project
+  test [preset]        Configure, build, and run CTest
+  cli [-- args...]     Build and run tinylsm_cli when V0 provides it
+  format [--check]     Format sources or verify formatting
+  lint [preset]        Run clang-tidy using the preset compilation database
+  asan                 Build and test with ASan + UBSan
+  release              Configure and build the release preset
+  clean [preset]       Run the generator's clean target
+  package              Package when install/CPack support is implemented
+  help                 Show this message
+EOF
+}
+
+configure() {
+  local preset="${1:-dev-debug}"
+  run_command cmake --preset "${preset}"
+}
+
+build() {
+  local preset="${1:-dev-debug}"
+  configure "${preset}"
+  run_command cmake --build --preset "${preset}"
+}
+
+test_project() {
+  local preset="${1:-dev-debug}"
+  build "${preset}"
+  run_command ctest --preset "${preset}" --output-on-failure
+}
+
+run_cli() {
+  build dev-debug
+  local executable="${TINYLSM_ROOT}/build/dev-debug/tools/tinylsm_cli"
+  if [[ ! -x "${executable}" ]]; then
+    die "tinylsm_cli is unavailable until the V0 public API and CLI target are implemented"
+  fi
+  if [[ "${1:-}" == "--" ]]; then
+    shift
+  fi
+  run_command "${executable}" "$@"
+}
+
+main() {
+  require_command cmake
+
+  local command="${1:-help}"
+  if [[ $# -gt 0 ]]; then
+    shift
+  fi
+
+  case "${command}" in
+    configure)
+      configure "${1:-dev-debug}"
+      ;;
+    build)
+      build "${1:-dev-debug}"
+      ;;
+    test)
+      test_project "${1:-dev-debug}"
+      ;;
+    cli)
+      run_cli "$@"
+      ;;
+    format)
+      run_command "${TINYLSM_ROOT}/scripts/format.sh" "$@"
+      ;;
+    lint)
+      run_command "${TINYLSM_ROOT}/scripts/lint.sh" "${1:-dev-debug}"
+      ;;
+    asan)
+      test_project dev-asan-ubsan
+      ;;
+    release)
+      build release
+      ;;
+    clean)
+      local preset="${1:-dev-debug}"
+      configure "${preset}"
+      run_command cmake --build --preset "${preset}" --target clean
+      ;;
+    package)
+      run_command "${TINYLSM_ROOT}/scripts/package.sh"
+      ;;
+    help|-h|--help)
+      usage
+      ;;
+    *)
+      usage >&2
+      die "unknown command: ${command}"
+      ;;
+  esac
+}
+
+main "$@"
