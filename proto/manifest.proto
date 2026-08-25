@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+package tinylsm.proto;
+
+message TableMetaProto {
+  uint64 file_number = 1;
+  uint64 file_size = 2;
+  bytes smallest_key = 3;
+  bytes largest_key = 4;
+  uint64 min_sequence = 5;
+  uint64 max_sequence = 6;
+}
+
+message ManifestSnapshotProto {
+  uint64 active_wal_number = 1;
+  uint64 next_file_number = 2;
+  uint64 last_sequence = 3;
+  optional TableMetaProto live_table = 4;
+}

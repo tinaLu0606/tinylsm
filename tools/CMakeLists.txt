@@ -1,1 +1,5 @@
-# The tinylsm_cli target will be added after the V0 public API exists.
+add_executable(tinylsm_cli tinylsm_cli.cpp)
+target_link_libraries(tinylsm_cli PRIVATE tinylsm::tinylsm)
+target_compile_features(tinylsm_cli PRIVATE cxx_std_20)
+tinylsm_set_warnings(tinylsm_cli)
+tinylsm_enable_sanitizers(tinylsm_cli)
