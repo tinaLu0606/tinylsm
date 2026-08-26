@@ -7,8 +7,10 @@
 
 namespace tinylsm::internal {
 
-Result<std::string> EncodeWalRecord(const InternalEntry& e, const DecodeLimits& limits) {
-  if (e.user_key.size() > limits.max_key_bytes || e.value.size() > limits.max_value_bytes ||
+Result<std::string> EncodeWalRecord(const InternalEntry& e,
+                                    const DecodeLimits& limits) {
+  if (e.user_key.size() > limits.max_key_bytes ||
+      e.value.size() > limits.max_value_bytes ||
       e.user_key.size() > std::numeric_limits<std::uint32_t>::max() ||
       e.value.size() > std::numeric_limits<std::uint32_t>::max()) {
     return Status::InvalidArgument("WAL key or value exceeds decode limits");
@@ -46,7 +48,8 @@ Result<InternalEntry> DecodeWalRecord(std::span<const std::byte> record,
   GetFixed16(record, 4, version);
   GetFixed32(record, 8, payload_size);
   GetFixed32(record, 12, expected_crc);
-  if (magic != kWalMagic || version != kWalVersion || std::to_integer<std::uint8_t>(record[7]) != 0)
+  if (magic != kWalMagic || version != kWalVersion ||
+      std::to_integer<std::uint8_t>(record[7]) != 0)
     return Status::Corruption("WAL header is invalid");
   if (payload_size != record.size() - kWalHeaderSize)
     return Status::Corruption("WAL payload length is invalid");
@@ -55,7 +58,8 @@ Result<InternalEntry> DecodeWalRecord(std::span<const std::byte> record,
       type_byte != static_cast<std::uint8_t>(ValueType::kTombstone))
     return Status::Corruption("WAL value type is invalid");
   std::string checked(1, static_cast<char>(type_byte));
-  checked.append(reinterpret_cast<const char*>(record.data() + kWalHeaderSize), payload_size);
+  checked.append(reinterpret_cast<const char*>(record.data() + kWalHeaderSize),
+                 payload_size);
   if (Crc32c(AsBytes(checked)) != expected_crc)
     return Status::Corruption("WAL checksum mismatch");
   std::uint64_t seq = 0;
@@ -64,13 +68,15 @@ Result<InternalEntry> DecodeWalRecord(std::span<const std::byte> record,
   GetFixed32(record, 24, key_size);
   GetFixed32(record, 28, value_size);
   if (key_size > limits.max_key_bytes || value_size > limits.max_value_bytes ||
-      static_cast<std::uint64_t>(key_size) + value_size + kWalPayloadHeaderSize != payload_size)
+      static_cast<std::uint64_t>(key_size) + value_size + kWalPayloadHeaderSize !=
+          payload_size)
     return Status::Corruption("WAL field length is invalid");
   InternalEntry e;
   e.sequence = seq;
   e.type = static_cast<ValueType>(type_byte);
   e.user_key.assign(reinterpret_cast<const char*>(record.data() + 32), key_size);
-  e.value.assign(reinterpret_cast<const char*>(record.data() + 32 + key_size), value_size);
+  e.value.assign(reinterpret_cast<const char*>(record.data() + 32 + key_size),
+                 value_size);
   if (e.type == ValueType::kTombstone && !e.value.empty())
     return Status::Corruption("WAL tombstone has a value");
   return e;

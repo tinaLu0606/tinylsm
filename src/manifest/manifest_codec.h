@@ -24,6 +24,8 @@ struct ManifestSnapshot {
   std::optional<TableMeta> live_table;
 };
 
+/// Converts a complete snapshot to or from TinyLSM framing around a Protobuf
+/// payload. Framing includes its own version, payload length, and CRC32C.
 class ManifestCodec {
 public:
   static Result<std::string> Encode(const ManifestSnapshot& snapshot);

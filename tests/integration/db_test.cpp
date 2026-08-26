@@ -17,9 +17,10 @@ namespace {
 class TempDir {
 public:
   TempDir() {
-    path_ = std::filesystem::temp_directory_path() /
-            ("tinylsm-test-" + std::to_string(::getpid()) + "-" +
-             std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    path_ =
+        std::filesystem::temp_directory_path() /
+        ("tinylsm-test-" + std::to_string(::getpid()) + "-" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
   }
   ~TempDir() {
     std::error_code error;
@@ -40,11 +41,14 @@ TEST(SstableTest, BuildsMultipleBlocksAndReadsBoundaryKeys) {
   ASSERT_TRUE(writable.ok());
   tinylsm::internal::SSTableBuilder builder(std::move(writable.value()), 40);
   ASSERT_TRUE(
-      builder.Add({"a", 1, tinylsm::internal::ValueType::kValue, std::string(20, 'a')}).ok());
+      builder.Add({"a", 1, tinylsm::internal::ValueType::kValue, std::string(20, 'a')})
+          .ok());
   ASSERT_TRUE(
-      builder.Add({"m", 2, tinylsm::internal::ValueType::kValue, std::string(20, 'm')}).ok());
+      builder.Add({"m", 2, tinylsm::internal::ValueType::kValue, std::string(20, 'm')})
+          .ok());
   ASSERT_TRUE(
-      builder.Add({"z", 3, tinylsm::internal::ValueType::kValue, std::string(20, 'z')}).ok());
+      builder.Add({"z", 3, tinylsm::internal::ValueType::kValue, std::string(20, 'z')})
+          .ok());
   ASSERT_TRUE(builder.Finish().ok());
   auto random = fs->OpenRandomAccess(dir.path() / "table.sst");
   ASSERT_TRUE(random.ok());
@@ -64,7 +68,8 @@ TEST(FileSystemTest, WritableFileRetriesShortWritesAndPropagatesPathErrors) {
   TempDir dir;
   auto fs = tinylsm::internal::NewPosixFileSystemForTesting(
       [](int fd, const void* data, std::size_t size) {
-        return static_cast<std::ptrdiff_t>(::write(fd, data, std::min<std::size_t>(size, 1)));
+        return static_cast<std::ptrdiff_t>(
+            ::write(fd, data, std::min<std::size_t>(size, 1)));
       });
   ASSERT_TRUE(fs->CreateDir(dir.path()).ok());
   const auto path = dir.path() / "short-write";
@@ -75,7 +80,8 @@ TEST(FileSystemTest, WritableFileRetriesShortWritesAndPropagatesPathErrors) {
   ASSERT_TRUE(writable.value()->Sync().ok());
   ASSERT_TRUE(writable.value()->Close().ok());
   std::ifstream input(path, std::ios::binary);
-  const std::string actual{std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+  const std::string actual{std::istreambuf_iterator<char>(input),
+                           std::istreambuf_iterator<char>()};
   EXPECT_EQ(actual, expected);
   EXPECT_EQ(fs->Rename(dir.path() / "missing", dir.path() / "target").code(),
             tinylsm::StatusCode::kIOError);
@@ -212,5 +218,6 @@ TEST(DBTest, CorruptReferencedDataBlockIsReportedOnRead) {
   }
   auto reopened = tinylsm::DB::Open(dir.path(), options);
   ASSERT_TRUE(reopened.ok()) << reopened.status().message();
-  EXPECT_EQ(reopened.value()->Get("key").status().code(), tinylsm::StatusCode::kCorruption);
+  EXPECT_EQ(reopened.value()->Get("key").status().code(),
+            tinylsm::StatusCode::kCorruption);
 }

@@ -90,9 +90,10 @@ TEST(WalReaderTest, ReplaysValidPrefixAndClassifiesTruncatedTail) {
 
   std::string corrupt = first.value() + second.value();
   corrupt[first.value().size() + 12] ^= 1;
-  ti::WalReader corrupt_reader(std::make_unique<StringSequentialFile>(corrupt, corrupt.size()), {});
-  auto corrupt_result =
-      corrupt_reader.Replay([](const ti::InternalEntry&) { return tinylsm::Status::Ok(); });
+  ti::WalReader corrupt_reader(
+      std::make_unique<StringSequentialFile>(corrupt, corrupt.size()), {});
+  auto corrupt_result = corrupt_reader.Replay(
+      [](const ti::InternalEntry&) { return tinylsm::Status::Ok(); });
   EXPECT_EQ(corrupt_result.status().code(), tinylsm::StatusCode::kCorruption);
 }
 

@@ -13,10 +13,13 @@
 
 namespace tinylsm {
 
+/// Coordinates storage modules and owns the ordering and crash-consistency
+/// rules that do not belong to any individual file format.
 class DB::Impl {
 public:
   static Result<std::unique_ptr<Impl>> OpenInMemory();
-  static Result<std::unique_ptr<Impl>> Open(const std::filesystem::path& path, Options options);
+  static Result<std::unique_ptr<Impl>> Open(const std::filesystem::path& path,
+                                            Options options);
   Status Put(std::string_view key, std::string_view value);
   Status Delete(std::string_view key);
   Result<std::string> Get(std::string_view key) const;
@@ -26,7 +29,13 @@ public:
 
 private:
   Impl() = default;
+
+  /// Performs the WAL-first write path and may synchronously trigger the first
+  /// V2 flush. A flush error can occur after the record was accepted earlier.
   Status Write(std::string_view key, std::string_view value, internal::ValueType type);
+
+  /// Publishes one SSTable and replacement WAL. Manifest publication is the
+  /// commit point; later in-memory switching and old-WAL cleanup cannot fail the write.
   Status FlushMemTable();
   Status CheckOpen() const;
 

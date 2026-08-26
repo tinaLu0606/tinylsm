@@ -70,7 +70,8 @@ Result<std::vector<InternalEntry>> DecodeDataBlock(std::span<const std::byte> by
     InternalEntry e;
     e.sequence = seq;
     e.type = static_cast<ValueType>(type);
-    e.user_key.assign(reinterpret_cast<const char*>(bytes.data() + offset + 17), key_size);
+    e.user_key.assign(reinterpret_cast<const char*>(bytes.data() + offset + 17),
+                      key_size);
     e.value.assign(reinterpret_cast<const char*>(bytes.data() + offset + 17 + key_size),
                    value_size);
     if ((i > 0 && !(previous < e.user_key)) ||

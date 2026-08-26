@@ -11,11 +11,20 @@
 
 namespace tinylsm::internal {
 
+/// An ordered, non-thread-safe collection containing the newest record per key.
 class MemTable {
 public:
+  /// Inserts or replaces an entry. A replacement's sequence must strictly
+  /// increase; tombstones remain stored so they can hide older disk values.
   Status Apply(InternalEntry entry);
   [[nodiscard]] Result<InternalEntry> Get(std::string_view key) const;
-  [[nodiscard]] std::vector<InternalEntry> Scan(std::string_view begin, std::string_view end) const;
+
+  /// Materializes entries in byte-wise key order over [begin, end). An empty
+  /// `end` means that the range is unbounded above.
+  [[nodiscard]] std::vector<InternalEntry> Scan(std::string_view begin,
+                                                std::string_view end) const;
+
+  /// Returns approximate owned entry memory, not total container allocation.
   [[nodiscard]] std::size_t ApproximateMemoryUsage() const { return bytes_; }
   [[nodiscard]] bool Empty() const { return entries_.empty(); }
   void Clear();

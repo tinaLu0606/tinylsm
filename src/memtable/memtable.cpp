@@ -33,7 +33,8 @@ Result<InternalEntry> MemTable::Get(std::string_view key) const {
   return it->second;
 }
 
-std::vector<InternalEntry> MemTable::Scan(std::string_view begin, std::string_view end) const {
+std::vector<InternalEntry> MemTable::Scan(std::string_view begin,
+                                          std::string_view end) const {
   std::vector<InternalEntry> result;
   for (auto it = entries_.lower_bound(begin);
        it != entries_.end() && (end.empty() || it->first < end); ++it) {

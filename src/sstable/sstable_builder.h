@@ -20,11 +20,17 @@ struct BuiltTableInfo {
   std::uint64_t max_sequence = 0;
 };
 
+/// Builds one immutable SSTable from entries supplied in strict key order.
 class SSTableBuilder {
 public:
   SSTableBuilder(std::unique_ptr<WritableFile> file, std::size_t block_bytes)
       : file_(std::move(file)), block_bytes_(block_bytes) {}
+
+  /// Adds one entry. Keys must strictly increase across all calls.
   Status Add(InternalEntry entry);
+
+  /// Writes the index and footer, syncs and closes the file, and returns table
+  /// metadata. Finish requires at least one entry and may be called only once.
   Result<BuiltTableInfo> Finish();
 
 private:

@@ -16,28 +16,34 @@ void PutFixed64(std::string& out, std::uint64_t value) {
     out.push_back(static_cast<char>(value >> shift));
   }
 }
-bool GetFixed16(std::span<const std::byte> in, std::size_t offset, std::uint16_t& value) {
+bool GetFixed16(std::span<const std::byte> in, std::size_t offset,
+                std::uint16_t& value) {
   if (offset > in.size() || in.size() - offset < 2)
     return false;
-  value = std::to_integer<std::uint8_t>(in[offset]) |
-          (static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(in[offset + 1])) << 8U);
+  value =
+      std::to_integer<std::uint8_t>(in[offset]) |
+      (static_cast<std::uint16_t>(std::to_integer<std::uint8_t>(in[offset + 1])) << 8U);
   return true;
 }
-bool GetFixed32(std::span<const std::byte> in, std::size_t offset, std::uint32_t& value) {
+bool GetFixed32(std::span<const std::byte> in, std::size_t offset,
+                std::uint32_t& value) {
   if (offset > in.size() || in.size() - offset < 4)
     return false;
   value = 0;
   for (unsigned i = 0; i < 4; ++i) {
-    value |= static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(in[offset + i])) << (8U * i);
+    value |= static_cast<std::uint32_t>(std::to_integer<std::uint8_t>(in[offset + i]))
+             << (8U * i);
   }
   return true;
 }
-bool GetFixed64(std::span<const std::byte> in, std::size_t offset, std::uint64_t& value) {
+bool GetFixed64(std::span<const std::byte> in, std::size_t offset,
+                std::uint64_t& value) {
   if (offset > in.size() || in.size() - offset < 8)
     return false;
   value = 0;
   for (unsigned i = 0; i < 8; ++i) {
-    value |= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(in[offset + i])) << (8U * i);
+    value |= static_cast<std::uint64_t>(std::to_integer<std::uint8_t>(in[offset + i]))
+             << (8U * i);
   }
   return true;
 }

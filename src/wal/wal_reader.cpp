@@ -44,8 +44,9 @@ WalReader::Replay(const std::function<Status(const InternalEntry&)>& apply) {
     GetFixed32(header, 8, payload_size);
     if (magic != kWalMagic || version != kWalVersion)
       return Status::Corruption("invalid WAL record in the middle of the log");
-    const std::uint64_t max_payload = static_cast<std::uint64_t>(kWalPayloadHeaderSize) +
-                                      limits_.max_key_bytes + limits_.max_value_bytes;
+    const std::uint64_t max_payload =
+        static_cast<std::uint64_t>(kWalPayloadHeaderSize) + limits_.max_key_bytes +
+        limits_.max_value_bytes;
     if (payload_size > max_payload)
       return Status::Corruption("WAL payload exceeds decode limits");
     std::vector<std::byte> record(kWalHeaderSize + payload_size);

@@ -11,11 +11,13 @@
 namespace tinylsm::internal {
 namespace {
 Status Error(std::string_view op, const std::filesystem::path& path) {
-  return Status::IOError(std::string(op) + " " + path.string() + ": " + std::strerror(errno));
+  return Status::IOError(std::string(op) + " " + path.string() + ": " +
+                         std::strerror(errno));
 }
 class PosixSequentialFile final : public SequentialFile {
 public:
-  PosixSequentialFile(int fd, std::filesystem::path path) : fd_(fd), path_(std::move(path)) {}
+  PosixSequentialFile(int fd, std::filesystem::path path)
+      : fd_(fd), path_(std::move(path)) {}
   ~PosixSequentialFile() override {
     if (fd_ >= 0)
       ::close(fd_);
@@ -36,14 +38,17 @@ private:
 };
 class PosixRandomAccessFile final : public RandomAccessFile {
 public:
-  PosixRandomAccessFile(int fd, std::filesystem::path path) : fd_(fd), path_(std::move(path)) {}
+  PosixRandomAccessFile(int fd, std::filesystem::path path)
+      : fd_(fd), path_(std::move(path)) {}
   ~PosixRandomAccessFile() override {
     if (fd_ >= 0)
       ::close(fd_);
   }
-  Result<std::size_t> ReadAt(std::uint64_t offset, std::span<std::byte> buffer) const override {
+  Result<std::size_t> ReadAt(std::uint64_t offset,
+                             std::span<std::byte> buffer) const override {
     while (true) {
-      const ssize_t n = ::pread(fd_, buffer.data(), buffer.size(), static_cast<off_t>(offset));
+      const ssize_t n =
+          ::pread(fd_, buffer.data(), buffer.size(), static_cast<off_t>(offset));
       if (n >= 0)
         return static_cast<std::size_t>(n);
       if (errno != EINTR)
@@ -63,7 +68,8 @@ private:
 };
 class PosixWritableFile final : public WritableFile {
 public:
-  PosixWritableFile(int fd, std::filesystem::path path, PosixWriteFunction write_function)
+  PosixWritableFile(int fd, std::filesystem::path path,
+                    PosixWriteFunction write_function)
       : fd_(fd), path_(std::move(path)), write_function_(std::move(write_function)) {}
   ~PosixWritableFile() override {
     if (fd_ >= 0)
@@ -72,7 +78,8 @@ public:
   Status Append(std::span<const std::byte> data) override {
     std::size_t done = 0;
     while (done < data.size()) {
-      const std::ptrdiff_t n = write_function_(fd_, data.data() + done, data.size() - done);
+      const std::ptrdiff_t n =
+          write_function_(fd_, data.data() + done, data.size() - done);
       if (n > 0) {
         done += static_cast<std::size_t>(n);
         continue;
@@ -108,7 +115,8 @@ class PosixFileSystem final : public FileSystem {
 public:
   explicit PosixFileSystem(PosixWriteFunction write_function)
       : write_function_(std::move(write_function)) {}
-  Result<std::unique_ptr<SequentialFile>> OpenSequential(const std::filesystem::path& p) override {
+  Result<std::unique_ptr<SequentialFile>>
+  OpenSequential(const std::filesystem::path& p) override {
     int fd = ::open(p.c_str(), O_RDONLY);
     if (fd < 0)
       return Error("open", p);
@@ -135,16 +143,19 @@ public:
     return ec ? Status::IOError("create directory " + p.string() + ": " + ec.message())
               : Status::Ok();
   }
-  Result<std::vector<std::filesystem::path>> ListDir(const std::filesystem::path& p) override {
+  Result<std::vector<std::filesystem::path>>
+  ListDir(const std::filesystem::path& p) override {
     std::vector<std::filesystem::path> out;
     std::error_code ec;
-    for (std::filesystem::directory_iterator it(p, ec), end; !ec && it != end; it.increment(ec))
+    for (std::filesystem::directory_iterator it(p, ec), end; !ec && it != end;
+         it.increment(ec))
       out.push_back(it->path());
     if (ec)
       return Status::IOError("list directory " + p.string() + ": " + ec.message());
     return out;
   }
-  Status Rename(const std::filesystem::path& a, const std::filesystem::path& b) override {
+  Status Rename(const std::filesystem::path& a,
+                const std::filesystem::path& b) override {
     if (::rename(a.c_str(), b.c_str()) != 0)
       return Error("rename", a);
     return Status::Ok();
@@ -182,11 +193,13 @@ private:
 } // namespace
 
 std::unique_ptr<FileSystem> NewPosixFileSystem() {
-  return std::make_unique<PosixFileSystem>([](int fd, const void* data, std::size_t size) {
-    return static_cast<std::ptrdiff_t>(::write(fd, data, size));
-  });
+  return std::make_unique<PosixFileSystem>(
+      [](int fd, const void* data, std::size_t size) {
+        return static_cast<std::ptrdiff_t>(::write(fd, data, size));
+      });
 }
-std::unique_ptr<FileSystem> NewPosixFileSystemForTesting(PosixWriteFunction write_function) {
+std::unique_ptr<FileSystem>
+NewPosixFileSystemForTesting(PosixWriteFunction write_function) {
   return std::make_unique<PosixFileSystem>(std::move(write_function));
 }
 Status ReadExactly(const RandomAccessFile& file, std::uint64_t offset,

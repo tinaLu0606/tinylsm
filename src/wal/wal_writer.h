@@ -12,6 +12,8 @@ class WalWriter {
 public:
   WalWriter(std::unique_ptr<WritableFile> file, DecodeLimits limits)
       : file_(std::move(file)), limits_(limits) {}
+
+  /// Encodes and appends one complete record; durability requires Sync().
   Status Append(const InternalEntry& entry);
   Status Sync() { return file_->Sync(); }
   Status Close() { return file_->Close(); }

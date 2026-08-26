@@ -4,7 +4,8 @@
 #include <limits>
 
 namespace tinylsm::internal {
-Result<std::unique_ptr<SSTableReader>> SSTableReader::Open(std::unique_ptr<RandomAccessFile> file) {
+Result<std::unique_ptr<SSTableReader>>
+SSTableReader::Open(std::unique_ptr<RandomAccessFile> file) {
   auto size = file->Size();
   if (!size.ok())
     return size.status();
@@ -18,9 +19,11 @@ Result<std::unique_ptr<SSTableReader>> SSTableReader::Open(std::unique_ptr<Rando
   if (!footer.ok())
     return footer.status();
   if (footer.value().index_offset > size.value() - kSstableFooterSize ||
-      footer.value().index_size > size.value() - kSstableFooterSize - footer.value().index_offset)
+      footer.value().index_size >
+          size.value() - kSstableFooterSize - footer.value().index_offset)
     return Status::Corruption("SSTable index range is invalid");
-  if (footer.value().index_offset + footer.value().index_size != size.value() - kSstableFooterSize)
+  if (footer.value().index_offset + footer.value().index_size !=
+      size.value() - kSstableFooterSize)
     return Status::Corruption("SSTable contains unreferenced bytes");
   std::vector<std::byte> index_bytes(footer.value().index_size);
   s = ReadExactly(*file, footer.value().index_offset, index_bytes);
@@ -45,16 +48,17 @@ Result<std::vector<InternalEntry>> SSTableReader::ReadBlock(const BlockMeta& m) 
   return DecodeDataBlock(bytes);
 }
 Result<InternalEntry> SSTableReader::Get(std::string_view key) const {
-  auto it = std::lower_bound(blocks_.begin(), blocks_.end(), key,
-                             [](const BlockMeta& b, std::string_view k) { return b.last_key < k; });
+  auto it = std::lower_bound(
+      blocks_.begin(), blocks_.end(), key,
+      [](const BlockMeta& b, std::string_view k) { return b.last_key < k; });
   if (it == blocks_.end() || key < it->first_key)
     return Status::NotFound("key is absent");
   auto entries = ReadBlock(*it);
   if (!entries.ok())
     return entries.status();
-  auto e =
-      std::lower_bound(entries.value().begin(), entries.value().end(), key,
-                       [](const InternalEntry& a, std::string_view k) { return a.user_key < k; });
+  auto e = std::lower_bound(
+      entries.value().begin(), entries.value().end(), key,
+      [](const InternalEntry& a, std::string_view k) { return a.user_key < k; });
   if (e == entries.value().end() || e->user_key != key)
     return Status::NotFound("key is absent");
   return *e;

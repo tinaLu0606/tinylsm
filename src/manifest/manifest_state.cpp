@@ -11,7 +11,8 @@ constexpr const char* kManifest = "MANIFEST";
 constexpr const char* kTemp = "MANIFEST.tmp";
 } // namespace
 
-Result<ManifestSnapshot> ManifestState::Load(FileSystem& fs, const std::filesystem::path& db) {
+Result<ManifestSnapshot> ManifestState::Load(FileSystem& fs,
+                                             const std::filesystem::path& db) {
   auto file = fs.OpenRandomAccess(db / kManifest);
   if (!file.ok())
     return file.status();

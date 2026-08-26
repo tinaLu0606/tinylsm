@@ -18,7 +18,9 @@ std::string Numbered(std::uint64_t n, std::string_view suffix) {
 }
 std::string WalName(std::uint64_t n) { return Numbered(n, ".wal"); }
 std::string SstName(std::uint64_t n) { return Numbered(n, ".sst"); }
-internal::DecodeLimits Limits(const Options& o) { return {o.max_key_bytes, o.max_value_bytes}; }
+internal::DecodeLimits Limits(const Options& o) {
+  return {o.max_key_bytes, o.max_value_bytes};
+}
 } // namespace
 
 Result<std::unique_ptr<DB::Impl>> DB::Impl::OpenInMemory() {
@@ -68,7 +70,8 @@ Result<std::unique_ptr<DB::Impl>> DB::Impl::Open(const std::filesystem::path& pa
     if (!s.ok())
       return s;
   }
-  impl->manifest_ = std::make_unique<internal::ManifestState>(*impl->fs_, path, snapshot);
+  impl->manifest_ =
+      std::make_unique<internal::ManifestState>(*impl->fs_, path, snapshot);
   if (snapshot.live_table) {
     const auto sst_path = path / SstName(snapshot.live_table->file_number);
     if (!impl->fs_->FileExists(sst_path))
@@ -93,8 +96,8 @@ Result<std::unique_ptr<DB::Impl>> DB::Impl::Open(const std::filesystem::path& pa
   if (!seq.ok())
     return seq.status();
   internal::WalReader reader(std::move(seq.value()), Limits(options));
-  auto replay =
-      reader.Replay([&](const internal::InternalEntry& e) { return impl->memtable_.Apply(e); });
+  auto replay = reader.Replay(
+      [&](const internal::InternalEntry& e) { return impl->memtable_.Apply(e); });
   if (!replay.ok())
     return replay.status();
   if (replay.value().truncated_tail) {
@@ -109,7 +112,8 @@ Result<std::unique_ptr<DB::Impl>> DB::Impl::Open(const std::filesystem::path& pa
   auto writable = impl->fs_->OpenWritable(wal_path, true);
   if (!writable.ok())
     return writable.status();
-  impl->wal_ = std::make_unique<internal::WalWriter>(std::move(writable.value()), Limits(options));
+  impl->wal_ = std::make_unique<internal::WalWriter>(std::move(writable.value()),
+                                                     Limits(options));
   return impl;
 }
 
@@ -122,7 +126,8 @@ Status DB::Impl::Put(std::string_view k, std::string_view v) {
 Status DB::Impl::Delete(std::string_view k) {
   return Write(k, {}, internal::ValueType::kTombstone);
 }
-Status DB::Impl::Write(std::string_view key, std::string_view value, internal::ValueType type) {
+Status DB::Impl::Write(std::string_view key, std::string_view value,
+                       internal::ValueType type) {
   auto open = CheckOpen();
   if (!open.ok())
     return open;
@@ -137,11 +142,13 @@ Status DB::Impl::Write(std::string_view key, std::string_view value, internal::V
   if (added > std::numeric_limits<std::size_t>::max() - projected)
     return Status::NotSupported("memtable size accounting overflow");
   projected += added;
-  if (manifest_ && manifest_->current().live_table && projected >= options_.memtable_bytes)
+  if (manifest_ && manifest_->current().live_table &&
+      projected >= options_.memtable_bytes)
     return Status::NotSupported("V2 supports only one flushed SSTable");
   if (next_sequence_ == std::numeric_limits<std::uint64_t>::max())
     return Status::NotSupported("sequence space is exhausted");
-  internal::InternalEntry entry{std::string(key), next_sequence_++, type, std::string(value)};
+  internal::InternalEntry entry{std::string(key), next_sequence_++, type,
+                                std::string(value)};
   if (wal_) {
     auto s = wal_->Append(entry);
     if (!s.ok())
@@ -176,7 +183,8 @@ Status DB::Impl::FlushMemTable() {
   auto file = fs_->OpenWritable(temp, false);
   if (!file.ok())
     return file.status();
-  internal::SSTableBuilder builder(std::move(file.value()), options_.sstable_block_bytes);
+  internal::SSTableBuilder builder(std::move(file.value()),
+                                   options_.sstable_block_bytes);
   for (auto& e : memtable_.Scan({}, {})) {
     auto s = builder.Add(e);
     if (!s.ok())
@@ -203,8 +211,8 @@ Status DB::Impl::FlushMemTable() {
   s = new_wal_file.value()->Sync();
   if (!s.ok())
     return s;
-  auto new_wal =
-      std::make_unique<internal::WalWriter>(std::move(new_wal_file.value()), Limits(options_));
+  auto new_wal = std::make_unique<internal::WalWriter>(std::move(new_wal_file.value()),
+                                                       Limits(options_));
   internal::ManifestSnapshot next;
   next.active_wal_number = wal_number;
   next.next_file_number = wal_number + 1;
@@ -215,9 +223,15 @@ Status DB::Impl::FlushMemTable() {
                                         built.value().largest_key,
                                         built.value().min_sequence,
                                         built.value().max_sequence};
+
+  // This is the flush commit point. Before it succeeds, the old Manifest, WAL,
+  // and MemTable remain authoritative even if orphan files were created.
   s = manifest_->Publish(next);
   if (!s.ok())
     return s;
+
+  // Everything below is an in-memory ownership switch or best-effort cleanup;
+  // the newly published state must remain successful once committed.
   auto old_wal = std::move(wal_);
   wal_ = std::move(new_wal);
   table_ = std::move(verified.value());
@@ -249,7 +263,8 @@ Result<std::string> DB::Impl::Get(std::string_view key) const {
   }
   return Status::NotFound("key is absent");
 }
-Result<std::vector<Entry>> DB::Impl::Scan(std::string_view begin, std::string_view end) const {
+Result<std::vector<Entry>> DB::Impl::Scan(std::string_view begin,
+                                          std::string_view end) const {
   auto s = CheckOpen();
   if (!s.ok())
     return s;

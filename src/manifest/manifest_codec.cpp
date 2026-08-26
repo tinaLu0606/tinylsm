@@ -42,7 +42,8 @@ Result<std::string> ManifestCodec::Encode(const ManifestSnapshot& s) {
 }
 Result<ManifestSnapshot> ManifestCodec::Decode(std::span<const std::byte> bytes) {
   if (bytes.size() < kHeader ||
-      bytes.size() - kHeader > static_cast<std::size_t>(std::numeric_limits<int>::max()))
+      bytes.size() - kHeader >
+          static_cast<std::size_t>(std::numeric_limits<int>::max()))
     return Status::Corruption("manifest is truncated or too large");
   std::uint32_t magic = 0, size = 0, crc = 0;
   std::uint16_t version = 0, reserved = 0;
@@ -51,7 +52,8 @@ Result<ManifestSnapshot> ManifestCodec::Decode(std::span<const std::byte> bytes)
   GetFixed16(bytes, 6, reserved);
   GetFixed32(bytes, 8, size);
   GetFixed32(bytes, 12, crc);
-  if (magic != kMagic || version != kVersion || reserved != 0 || size != bytes.size() - kHeader)
+  if (magic != kMagic || version != kVersion || reserved != 0 ||
+      size != bytes.size() - kHeader)
     return Status::Corruption("manifest framing is invalid");
   auto payload = bytes.subspan(kHeader);
   if (Crc32c(payload) != crc)
@@ -69,7 +71,8 @@ Result<ManifestSnapshot> ManifestCodec::Decode(std::span<const std::byte> bytes)
     const auto& p = message.live_table();
     TableMeta t{p.file_number(), p.file_size(),    p.smallest_key(),
                 p.largest_key(), p.min_sequence(), p.max_sequence()};
-    if (t.file_number == 0 || t.smallest_key > t.largest_key || t.min_sequence > t.max_sequence)
+    if (t.file_number == 0 || t.smallest_key > t.largest_key ||
+        t.min_sequence > t.max_sequence)
       return Status::Corruption("manifest table metadata is invalid");
     s.live_table = std::move(t);
   }

@@ -10,11 +10,17 @@
 
 namespace tinylsm::internal {
 
+/// Reads an immutable SSTable using its in-memory index and on-demand blocks.
 class SSTableReader {
 public:
-  static Result<std::unique_ptr<SSTableReader>> Open(std::unique_ptr<RandomAccessFile> file);
+  /// Validates and loads the footer and index without loading all data blocks.
+  static Result<std::unique_ptr<SSTableReader>>
+  Open(std::unique_ptr<RandomAccessFile> file);
   Result<InternalEntry> Get(std::string_view key) const;
-  Result<std::vector<InternalEntry>> Scan(std::string_view begin, std::string_view end) const;
+
+  /// Materializes entries in [begin, end); an empty `end` is unbounded above.
+  Result<std::vector<InternalEntry>> Scan(std::string_view begin,
+                                          std::string_view end) const;
 
 private:
   SSTableReader(std::unique_ptr<RandomAccessFile> file, std::vector<BlockMeta> blocks)

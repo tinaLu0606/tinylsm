@@ -26,6 +26,8 @@ struct Footer {
   std::uint64_t index_size = 0;
 };
 
+/// Data blocks, the index, and the fixed-size footer each carry an independent
+/// CRC32C check. Decode functions reject malformed lengths and key ordering.
 Result<std::string> EncodeDataBlock(const std::vector<InternalEntry>& entries);
 Result<std::vector<InternalEntry>> DecodeDataBlock(std::span<const std::byte> bytes);
 Result<std::string> EncodeIndex(const std::vector<BlockMeta>& blocks);
