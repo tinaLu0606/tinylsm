@@ -16,11 +16,4 @@ struct InternalEntry {
   bool operator==(const InternalEntry&) const = default;
 };
 
-struct BytewiseLess {
-  using is_transparent = void;
-  bool operator()(std::string_view lhs, std::string_view rhs) const {
-    return lhs < rhs;
-  }
-};
-
 } // namespace tinylsm::internal

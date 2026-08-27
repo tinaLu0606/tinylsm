@@ -8,6 +8,7 @@
 
 #include "model/internal_entry.h"
 #include "tinylsm/result.h"
+#include "util/bytewise_less.h"
 
 namespace tinylsm::internal {
 

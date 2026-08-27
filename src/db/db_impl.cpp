@@ -7,6 +7,7 @@
 #include <sstream>
 
 #include "sstable/sstable_builder.h"
+#include "util/bytewise_less.h"
 #include "wal/wal_reader.h"
 
 namespace tinylsm {
