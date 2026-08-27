@@ -8,7 +8,7 @@ target_sources(tinylsm PRIVATE
   memtable/memtable.cpp
   sstable/sstable_builder.cpp sstable/sstable_reader.cpp
   util/coding.cpp util/crc32c.cpp
-  wal/wal_reader.cpp wal/wal_writer.cpp
+  wal/wal_reader.cpp wal/wal_record_codec.cpp wal/wal_writer.cpp
 )
 
 protobuf_generate(

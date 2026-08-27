@@ -21,8 +21,7 @@ struct DecodeLimits {
   std::uint32_t max_value_bytes = 64U * 1024U * 1024U;
 };
 
-/// Encodes or decodes exactly one complete little-endian WAL record. Framing,
-/// sequential replay, and truncated-tail handling belong to WalReader.
+/// Encodes or decodes exactly one complete little-endian WAL record.
 Result<std::string> EncodeWalRecord(const InternalEntry& entry,
                                     const DecodeLimits& limits);
 Result<InternalEntry> DecodeWalRecord(std::span<const std::byte> record,

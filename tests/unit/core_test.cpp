@@ -9,8 +9,8 @@
 #include "memtable/memtable.h"
 #include "sstable/sstable_format.h"
 #include "util/coding.h"
-#include "wal/log_format.h"
 #include "wal/wal_reader.h"
+#include "wal/wal_record_codec.h"
 
 namespace ti = tinylsm::internal;
 

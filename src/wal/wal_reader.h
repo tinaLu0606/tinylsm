@@ -6,7 +6,7 @@
 
 #include "io/file.h"
 #include "model/internal_entry.h"
-#include "wal/log_format.h"
+#include "wal/wal_record_codec.h"
 
 namespace tinylsm::internal {
 

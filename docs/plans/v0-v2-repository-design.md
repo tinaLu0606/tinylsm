@@ -80,7 +80,8 @@ tinylsm/
 │   │   ├── file.cpp
 │   │   └── file.h
 │   ├── wal/                        # V1
-│   │   ├── log_format.h
+│   │   ├── wal_record_codec.cpp
+│   │   ├── wal_record_codec.h
 │   │   ├── wal_reader.cpp
 │   │   ├── wal_reader.h
 │   │   ├── wal_writer.cpp
@@ -548,7 +549,8 @@ src/memtable/memtable.cpp
 src/memtable/memtable.h
 src/io/file.cpp
 src/io/file.h
-src/wal/log_format.h
+src/wal/wal_record_codec.cpp
+src/wal/wal_record_codec.h
 src/wal/wal_reader.cpp
 src/wal/wal_reader.h
 src/wal/wal_writer.cpp
