@@ -223,7 +223,7 @@ Status SSTableBuilder::FlushBlock() {
   if (!encoded.ok())
     return encoded.status();
   if (encoded.value().size() > std::numeric_limits<std::uint64_t>::max() - offset_)
-    return Status::InvalidArgument("SSTable offset overflow");
+    return Status::ResourceExhausted("SSTable offset space is exhausted");
 
   BlockMeta meta{pending_.front().user_key, pending_.back().user_key, offset_,
                  encoded.value().size()};
@@ -250,7 +250,7 @@ Result<BuiltTableInfo> SSTableBuilder::Finish() {
   if (!index.ok())
     return index.status();
   if (index.value().size() > std::numeric_limits<std::uint64_t>::max() - offset_)
-    return Status::InvalidArgument("SSTable index offset overflow");
+    return Status::ResourceExhausted("SSTable index offset space is exhausted");
 
   Footer f{offset_, index.value().size()};
   s = file_->Append(AsBytes(index.value()));

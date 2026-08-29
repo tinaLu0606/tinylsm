@@ -1,18 +1,19 @@
 #include "io/file.h"
 
 #include <cerrno>
-#include <cstring>
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <system_error>
 #include <utility>
 
 namespace tinylsm::internal {
 namespace {
-Status Error(std::string_view op, const std::filesystem::path& path) {
+Status Error(std::string_view op, const std::filesystem::path& path, int error_number) {
+  const std::error_code error(error_number, std::generic_category());
   return Status::IOError(std::string(op) + " " + path.string() + ": " +
-                         std::strerror(errno));
+                         error.message());
 }
 class PosixSequentialFile final : public SequentialFile {
 public:
@@ -28,7 +29,7 @@ public:
       if (n >= 0)
         return static_cast<std::size_t>(n);
       if (errno != EINTR)
-        return Error("read", path_);
+        return Error("read", path_, errno);
     }
   }
 
@@ -52,13 +53,13 @@ public:
       if (n >= 0)
         return static_cast<std::size_t>(n);
       if (errno != EINTR)
-        return Error("pread", path_);
+        return Error("pread", path_, errno);
     }
   }
   Result<std::uint64_t> Size() const override {
     struct stat st{};
     if (::fstat(fd_, &st) != 0)
-      return Error("fstat", path_);
+      return Error("fstat", path_, errno);
     return static_cast<std::uint64_t>(st.st_size);
   }
 
@@ -90,14 +91,14 @@ public:
         continue;
       if (n == 0)
         errno = EIO;
-      return Error("write", path_);
+      return Error("write", path_, errno);
     }
 
     return Status::Ok();
   }
   Status Sync() override {
     if (::fsync(fd_) != 0)
-      return Error("fsync", path_);
+      return Error("fsync", path_, errno);
     return Status::Ok();
   }
   Status Close() override {
@@ -105,7 +106,7 @@ public:
       return Status::Ok();
     const int fd = std::exchange(fd_, -1);
     if (::close(fd) != 0)
-      return Error("close", path_);
+      return Error("close", path_, errno);
     return Status::Ok();
   }
 
@@ -122,14 +123,14 @@ public:
   OpenSequential(const std::filesystem::path& p) override {
     int fd = ::open(p.c_str(), O_RDONLY);
     if (fd < 0)
-      return Error("open", p);
+      return Error("open", p, errno);
     return std::unique_ptr<SequentialFile>(new PosixSequentialFile(fd, p));
   }
   Result<std::unique_ptr<RandomAccessFile>>
   OpenRandomAccess(const std::filesystem::path& p) override {
     int fd = ::open(p.c_str(), O_RDONLY);
     if (fd < 0)
-      return Error("open", p);
+      return Error("open", p, errno);
     return std::unique_ptr<RandomAccessFile>(new PosixRandomAccessFile(fd, p));
   }
   Result<std::unique_ptr<WritableFile>> OpenWritable(const std::filesystem::path& p,
@@ -137,7 +138,7 @@ public:
     int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
     int fd = ::open(p.c_str(), flags, 0644);
     if (fd < 0)
-      return Error("open", p);
+      return Error("open", p, errno);
     return std::unique_ptr<WritableFile>(new PosixWritableFile(fd, p, write_function_));
   }
   Status CreateDir(const std::filesystem::path& p) override {
@@ -160,36 +161,43 @@ public:
   }
   Status Rename(const std::filesystem::path& a,
                 const std::filesystem::path& b) override {
-    if (::rename(a.c_str(), b.c_str()) != 0)
-      return Error("rename", a);
+    if (::rename(a.c_str(), b.c_str()) != 0) {
+      const int error_number = errno;
+      return Error("rename " + a.string() + " to", b, error_number);
+    }
     return Status::Ok();
   }
   Status Remove(const std::filesystem::path& p) override {
     if (::unlink(p.c_str()) != 0 && errno != ENOENT)
-      return Error("unlink", p);
+      return Error("unlink", p, errno);
     return Status::Ok();
   }
   Status Truncate(const std::filesystem::path& p, std::uint64_t n) override {
     if (::truncate(p.c_str(), static_cast<off_t>(n)) != 0)
-      return Error("truncate", p);
+      return Error("truncate", p, errno);
     return Status::Ok();
   }
-  bool FileExists(const std::filesystem::path& p) override {
-    return ::access(p.c_str(), F_OK) == 0;
+  Result<bool> FileExists(const std::filesystem::path& p) override {
+    if (::access(p.c_str(), F_OK) == 0)
+      return true;
+    const int error_number = errno;
+    if (error_number == ENOENT || error_number == ENOTDIR)
+      return false;
+    return Error("access", p, error_number);
   }
   Status SyncDir(const std::filesystem::path& p) override {
     int fd = ::open(p.c_str(), O_RDONLY);
     if (fd < 0)
-      return Error("open directory", p);
+      return Error("open directory", p, errno);
 
     if (::fsync(fd) != 0) {
-      auto s = Error("fsync directory", p);
+      auto s = Error("fsync directory", p, errno);
       ::close(fd);
       return s;
     }
 
     if (::close(fd) != 0)
-      return Error("close directory", p);
+      return Error("close directory", p, errno);
     return Status::Ok();
   }
 

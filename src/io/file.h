@@ -65,7 +65,8 @@ public:
                         const std::filesystem::path& to) = 0;
   virtual Status Remove(const std::filesystem::path& path) = 0;
   virtual Status Truncate(const std::filesystem::path& path, std::uint64_t size) = 0;
-  virtual bool FileExists(const std::filesystem::path& path) = 0;
+  /// Returns false only when the path is absent; inspection failures are errors.
+  virtual Result<bool> FileExists(const std::filesystem::path& path) = 0;
   /// Persists directory-entry changes such as Rename() and Remove().
   virtual Status SyncDir(const std::filesystem::path& path) = 0;
 };

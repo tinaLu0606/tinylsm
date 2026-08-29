@@ -12,10 +12,16 @@
 
 namespace tinylsm {
 
+namespace internal {
+class DBTestPeer;
+}
+
 /// A movable, non-copyable key-value database handle.
 ///
 /// Keys and values are arbitrary byte strings. DB instances are not thread-safe;
 /// callers must provide external synchronization when sharing an instance.
+/// Expected database failures use Status/Result. Standard-library and dependency
+/// exceptions, including std::bad_alloc, may propagate through this interface.
 class DB final {
 public:
   /// Creates a process-local database with no persistent storage or recovery.
@@ -42,9 +48,9 @@ public:
   /// Associates `key` with `value`, replacing the key's previous value.
   ///
   /// Empty values are valid. For a persistent database, acknowledgement follows
-  /// the durability policy selected by Options::sync_on_write. An error may be
-  /// reported after the WAL or MemTable has accepted the write, so callers must
-  /// not assume that a failed Put left the key unchanged.
+  /// the durability policy selected by Options::sync_on_write. An error Status or
+  /// propagated exception may occur after the WAL or MemTable has accepted the
+  /// write, so callers must not assume that a failed Put left the key unchanged.
   Status Put(std::string_view key, std::string_view value);
 
   /// Returns the current value for `key`.
@@ -55,8 +61,8 @@ public:
 
   /// Deletes `key` by recording a tombstone.
   ///
-  /// As with Put(), an error may be reported after the delete was accepted by an
-  /// earlier stage of the write path.
+  /// As with Put(), an error Status or propagated exception may occur after the
+  /// delete was accepted by an earlier stage of the write path.
   Status Delete(std::string_view key);
 
   /// Returns live entries in byte-wise key order over the range [begin, end).
@@ -67,11 +73,12 @@ public:
 
   /// Closes writable resources, syncing the WAL first when sync_on_write is enabled.
   ///
-  /// The DB is considered closed after this call even if closing returns an
-  /// error. Later operations, including another Close(), return kAlreadyClosed.
+  /// A sync failure leaves the DB open so the caller may retry. Once the
+  /// underlying close is attempted, the DB is closed even if close reports an error.
   Status Close();
 
 private:
+  friend class internal::DBTestPeer;
   class Impl;
   explicit DB(std::unique_ptr<Impl> impl);
   std::unique_ptr<Impl> impl_;

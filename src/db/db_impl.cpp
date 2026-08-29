@@ -30,31 +30,45 @@ Result<std::unique_ptr<DB::Impl>> DB::Impl::OpenInMemory() {
 
 Result<std::unique_ptr<DB::Impl>> DB::Impl::Open(const std::filesystem::path& path,
                                                  Options options) {
+  return Open(path, std::move(options), internal::NewPosixFileSystem());
+}
+
+Result<std::unique_ptr<DB::Impl>>
+DB::Impl::Open(const std::filesystem::path& path, Options options,
+               std::unique_ptr<internal::FileSystem> fs) {
   if (path.empty())
     return Status::InvalidArgument("database path is empty");
   if (options.memtable_bytes == 0 || options.sstable_block_bytes == 0)
     return Status::InvalidArgument("size options must be non-zero");
+  if (!fs)
+    return Status::InvalidArgument("filesystem is null");
 
   auto impl = std::unique_ptr<Impl>(new Impl());
   impl->options_ = options;
   impl->path_ = path;
-  impl->fs_ = internal::NewPosixFileSystem();
+  impl->fs_ = std::move(fs);
 
-  if (!impl->fs_->FileExists(path)) {
+  auto path_exists = impl->fs_->FileExists(path);
+  if (!path_exists.ok())
+    return path_exists.status().WithContext("open database");
+  if (!path_exists.value()) {
     if (!options.create_if_missing)
       return Status::NotFound("database directory does not exist");
     auto s = impl->fs_->CreateDir(path);
     if (!s.ok())
-      return s;
+      return s.WithContext("create database directory");
   }
 
   const auto manifest_path = path / "MANIFEST";
   internal::ManifestSnapshot snapshot;
 
-  if (impl->fs_->FileExists(manifest_path)) {
+  auto manifest_exists = impl->fs_->FileExists(manifest_path);
+  if (!manifest_exists.ok())
+    return manifest_exists.status().WithContext("inspect MANIFEST");
+  if (manifest_exists.value()) {
     auto loaded = internal::ManifestState::Load(*impl->fs_, path);
     if (!loaded.ok())
-      return loaded.status();
+      return loaded.status().WithContext("load MANIFEST");
     snapshot = std::move(loaded.value());
   } else {
     if (!options.create_if_missing)
@@ -65,18 +79,18 @@ Result<std::unique_ptr<DB::Impl>> DB::Impl::Open(const std::filesystem::path& pa
 
     auto initial = impl->fs_->OpenWritable(path / WalName(1), false);
     if (!initial.ok())
-      return initial.status();
+      return initial.status().WithContext("create initial WAL");
     auto s = initial.value()->Sync();
     if (!s.ok())
-      return s;
+      return s.WithContext("sync initial WAL");
     s = initial.value()->Close();
     if (!s.ok())
-      return s;
+      return s.WithContext("close initial WAL");
 
     internal::ManifestState state(*impl->fs_, path, snapshot);
     s = state.Publish(snapshot);
     if (!s.ok())
-      return s;
+      return s.WithContext("publish initial MANIFEST");
   }
 
   impl->manifest_ =
@@ -84,50 +98,56 @@ Result<std::unique_ptr<DB::Impl>> DB::Impl::Open(const std::filesystem::path& pa
 
   if (snapshot.live_table) {
     const auto sst_path = path / SstName(snapshot.live_table->file_number);
-    if (!impl->fs_->FileExists(sst_path))
+    auto table_exists = impl->fs_->FileExists(sst_path);
+    if (!table_exists.ok())
+      return table_exists.status().WithContext("inspect Manifest SSTable");
+    if (!table_exists.value())
       return Status::Corruption("manifest references a missing SSTable");
     auto f = impl->fs_->OpenRandomAccess(sst_path);
     if (!f.ok())
-      return f.status();
+      return f.status().WithContext("open Manifest SSTable");
 
     auto actual_size = f.value()->Size();
     if (!actual_size.ok())
-      return actual_size.status();
+      return actual_size.status().WithContext("read Manifest SSTable size");
     if (actual_size.value() != snapshot.live_table->file_size)
       return Status::Corruption("manifest SSTable size does not match file");
 
     auto reader = internal::SSTableReader::Open(std::move(f.value()));
     if (!reader.ok())
-      return reader.status();
+      return reader.status().WithContext("validate Manifest SSTable");
     impl->table_ = std::move(reader.value());
   }
 
   const auto wal_path = path / WalName(snapshot.active_wal_number);
-  if (!impl->fs_->FileExists(wal_path))
+  auto wal_exists = impl->fs_->FileExists(wal_path);
+  if (!wal_exists.ok())
+    return wal_exists.status().WithContext("inspect active WAL");
+  if (!wal_exists.value())
     return Status::Corruption("manifest references a missing WAL");
   auto seq = impl->fs_->OpenSequential(wal_path);
   if (!seq.ok())
-    return seq.status();
+    return seq.status().WithContext("open active WAL for replay");
 
   internal::WalReader reader(std::move(seq.value()), Limits(options));
   auto replay = reader.Replay(
       [&](const internal::InternalEntry& e) { return impl->memtable_.Apply(e); });
   if (!replay.ok())
-    return replay.status();
+    return replay.status().WithContext("replay active WAL");
   if (replay.value().truncated_tail) {
     auto s = impl->fs_->Truncate(wal_path, replay.value().valid_bytes);
     if (!s.ok())
-      return s;
+      return s.WithContext("truncate incomplete WAL tail");
   }
 
   const auto max_seq = std::max(snapshot.last_sequence, replay.value().max_sequence);
   if (max_seq == std::numeric_limits<std::uint64_t>::max())
-    return Status::NotSupported("sequence space is exhausted");
+    return Status::ResourceExhausted("sequence space is exhausted");
   impl->next_sequence_ = max_seq + 1;
 
   auto writable = impl->fs_->OpenWritable(wal_path, true);
   if (!writable.ok())
-    return writable.status();
+    return writable.status().WithContext("open active WAL for append");
   impl->wal_ = std::make_unique<internal::WalWriter>(std::move(writable.value()),
                                                      Limits(options));
   return impl;
@@ -157,14 +177,14 @@ Status DB::Impl::Write(std::string_view key, std::string_view value,
                  existing.value().value.size();
   const std::size_t added = sizeof(internal::InternalEntry) + key.size() + value.size();
   if (added > std::numeric_limits<std::size_t>::max() - projected)
-    return Status::NotSupported("memtable size accounting overflow");
+    return Status::ResourceExhausted("memtable size accounting overflow");
   projected += added;
 
   if (manifest_ && manifest_->current().live_table &&
       projected >= options_.memtable_bytes)
     return Status::NotSupported("V2 supports only one flushed SSTable");
   if (next_sequence_ == std::numeric_limits<std::uint64_t>::max())
-    return Status::NotSupported("sequence space is exhausted");
+    return Status::ResourceExhausted("sequence space is exhausted");
 
   internal::InternalEntry entry{std::string(key), next_sequence_++, type,
                                 std::string(value)};
@@ -199,47 +219,47 @@ Status DB::Impl::FlushMemTable() {
 
   const std::uint64_t table_number = current.next_file_number;
   if (table_number >= std::numeric_limits<std::uint64_t>::max() - 1)
-    return Status::NotSupported("file number space is exhausted");
+    return Status::ResourceExhausted("file number space is exhausted");
   const std::uint64_t wal_number = table_number + 1;
 
   const auto temp = *path_ / (SstName(table_number) + ".tmp"),
              final = *path_ / SstName(table_number);
   auto file = fs_->OpenWritable(temp, false);
   if (!file.ok())
-    return file.status();
+    return file.status().WithContext("create temporary SSTable");
 
   internal::SSTableBuilder builder(std::move(file.value()),
                                    options_.sstable_block_bytes);
   for (auto& e : memtable_.Scan({}, {})) {
     auto s = builder.Add(e);
     if (!s.ok())
-      return s;
+      return s.WithContext("build temporary SSTable");
   }
 
   auto built = builder.Finish();
   if (!built.ok())
-    return built.status();
+    return built.status().WithContext("finish temporary SSTable");
 
   auto verify_file = fs_->OpenRandomAccess(temp);
   if (!verify_file.ok())
-    return verify_file.status();
+    return verify_file.status().WithContext("open temporary SSTable for validation");
   auto verified = internal::SSTableReader::Open(std::move(verify_file.value()));
   if (!verified.ok())
-    return verified.status();
+    return verified.status().WithContext("validate temporary SSTable");
 
   auto s = fs_->Rename(temp, final);
   if (!s.ok())
-    return s;
+    return s.WithContext("publish SSTable filename");
   s = fs_->SyncDir(*path_);
   if (!s.ok())
-    return s;
+    return s.WithContext("sync database directory after SSTable rename");
 
   auto new_wal_file = fs_->OpenWritable(*path_ / WalName(wal_number), false);
   if (!new_wal_file.ok())
-    return new_wal_file.status();
+    return new_wal_file.status().WithContext("create replacement WAL");
   s = new_wal_file.value()->Sync();
   if (!s.ok())
-    return s;
+    return s.WithContext("sync replacement WAL");
   auto new_wal = std::make_unique<internal::WalWriter>(std::move(new_wal_file.value()),
                                                        Limits(options_));
 
@@ -258,7 +278,7 @@ Status DB::Impl::FlushMemTable() {
   // and MemTable remain authoritative even if orphan files were created.
   s = manifest_->Publish(next);
   if (!s.ok())
-    return s;
+    return s.WithContext("publish flush MANIFEST");
 
   // Everything below is an in-memory ownership switch or best-effort cleanup;
   // the newly published state must remain successful once committed.
@@ -267,8 +287,8 @@ Status DB::Impl::FlushMemTable() {
   table_ = std::move(verified.value());
   memtable_.Clear();
   if (old_wal)
-    old_wal->Close();
-  fs_->Remove(*path_ / WalName(current.active_wal_number));
+    old_wal->Close().IgnoreError();
+  fs_->Remove(*path_ / WalName(current.active_wal_number)).IgnoreError();
   return Status::Ok();
 }
 
@@ -326,20 +346,24 @@ Result<std::vector<Entry>> DB::Impl::Scan(std::string_view begin,
 Status DB::Impl::Close() {
   if (closed_)
     return Status::AlreadyClosed("database is closed");
-  closed_ = true;
 
-  if (!wal_)
+  if (!wal_) {
+    closed_ = true;
     return Status::Ok();
+  }
 
   if (options_.sync_on_write) {
     auto s = wal_->Sync();
     if (!s.ok())
-      return s;
+      return s.WithContext("close database: sync WAL");
   }
-  return wal_->Close();
+
+  auto s = wal_->Close();
+  closed_ = true;
+  return s.ok() ? s : s.WithContext("close database: close WAL");
 }
 DB::Impl::~Impl() {
   if (!closed_ && wal_)
-    wal_->Close();
+    wal_->Close().IgnoreError();
 }
 } // namespace tinylsm

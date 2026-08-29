@@ -20,6 +20,9 @@ public:
   static Result<std::unique_ptr<Impl>> OpenInMemory();
   static Result<std::unique_ptr<Impl>> Open(const std::filesystem::path& path,
                                             Options options);
+  static Result<std::unique_ptr<Impl>> Open(const std::filesystem::path& path,
+                                            Options options,
+                                            std::unique_ptr<internal::FileSystem> fs);
   Status Put(std::string_view key, std::string_view value);
   Status Delete(std::string_view key);
   Result<std::string> Get(std::string_view key) const;

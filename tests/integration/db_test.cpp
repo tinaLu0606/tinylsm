@@ -4,10 +4,16 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <memory>
+#include <stdexcept>
 #include <string>
 #include <unistd.h>
+#include <utility>
 
+#include "db/db_test_peer.h"
 #include "io/file.h"
+#include "manifest/manifest_state.h"
 #include "sstable/sstable_builder.h"
 #include "sstable/sstable_reader.h"
 #include "tinylsm/db.h"
@@ -31,6 +37,114 @@ public:
 private:
   std::filesystem::path path_;
 };
+
+struct FaultState {
+  bool fail_file_exists_once = false;
+  bool fail_sync_once = false;
+  bool fail_close_once = false;
+  bool throw_append_once = false;
+};
+
+class FaultWritableFile final : public tinylsm::internal::WritableFile {
+public:
+  FaultWritableFile(std::unique_ptr<tinylsm::internal::WritableFile> inner,
+                    std::shared_ptr<FaultState> state)
+      : inner_(std::move(inner)), state_(std::move(state)) {}
+
+  tinylsm::Status Append(std::span<const std::byte> data) override {
+    if (std::exchange(state_->throw_append_once, false))
+      throw std::runtime_error("injected append exception");
+    return inner_->Append(data);
+  }
+
+  tinylsm::Status Sync() override {
+    if (std::exchange(state_->fail_sync_once, false))
+      return tinylsm::Status::IOError("injected sync failure");
+    return inner_->Sync();
+  }
+
+  tinylsm::Status Close() override {
+    if (!std::exchange(state_->fail_close_once, false))
+      return inner_->Close();
+    auto closed = inner_->Close();
+    if (!closed.ok())
+      return closed;
+    return tinylsm::Status::IOError("injected close failure");
+  }
+
+private:
+  std::unique_ptr<tinylsm::internal::WritableFile> inner_;
+  std::shared_ptr<FaultState> state_;
+};
+
+class FaultInjectionFileSystem final : public tinylsm::internal::FileSystem {
+public:
+  FaultInjectionFileSystem(std::unique_ptr<tinylsm::internal::FileSystem> inner,
+                           std::shared_ptr<FaultState> state)
+      : inner_(std::move(inner)), state_(std::move(state)) {}
+
+  tinylsm::Result<std::unique_ptr<tinylsm::internal::SequentialFile>>
+  OpenSequential(const std::filesystem::path& path) override {
+    return inner_->OpenSequential(path);
+  }
+
+  tinylsm::Result<std::unique_ptr<tinylsm::internal::RandomAccessFile>>
+  OpenRandomAccess(const std::filesystem::path& path) override {
+    return inner_->OpenRandomAccess(path);
+  }
+
+  tinylsm::Result<std::unique_ptr<tinylsm::internal::WritableFile>>
+  OpenWritable(const std::filesystem::path& path, bool append) override {
+    auto file = inner_->OpenWritable(path, append);
+    if (!file.ok())
+      return file.status();
+    return std::unique_ptr<tinylsm::internal::WritableFile>(
+        new FaultWritableFile(std::move(file.value()), state_));
+  }
+
+  tinylsm::Status CreateDir(const std::filesystem::path& path) override {
+    return inner_->CreateDir(path);
+  }
+
+  tinylsm::Result<std::vector<std::filesystem::path>>
+  ListDir(const std::filesystem::path& path) override {
+    return inner_->ListDir(path);
+  }
+
+  tinylsm::Status Rename(const std::filesystem::path& from,
+                         const std::filesystem::path& to) override {
+    return inner_->Rename(from, to);
+  }
+
+  tinylsm::Status Remove(const std::filesystem::path& path) override {
+    return inner_->Remove(path);
+  }
+
+  tinylsm::Status Truncate(const std::filesystem::path& path,
+                           std::uint64_t size) override {
+    return inner_->Truncate(path, size);
+  }
+
+  tinylsm::Result<bool> FileExists(const std::filesystem::path& path) override {
+    if (std::exchange(state_->fail_file_exists_once, false))
+      return tinylsm::Status::IOError("injected exists failure");
+    return inner_->FileExists(path);
+  }
+
+  tinylsm::Status SyncDir(const std::filesystem::path& path) override {
+    return inner_->SyncDir(path);
+  }
+
+private:
+  std::unique_ptr<tinylsm::internal::FileSystem> inner_;
+  std::shared_ptr<FaultState> state_;
+};
+
+std::unique_ptr<tinylsm::internal::FileSystem>
+FaultFileSystem(const std::shared_ptr<FaultState>& state) {
+  return std::make_unique<FaultInjectionFileSystem>(
+      tinylsm::internal::NewPosixFileSystem(), state);
+}
 } // namespace
 
 TEST(SstableTest, BuildsMultipleBlocksAndReadsBoundaryKeys) {
@@ -73,6 +187,9 @@ TEST(FileSystemTest, WritableFileRetriesShortWritesAndPropagatesPathErrors) {
       });
   ASSERT_TRUE(fs->CreateDir(dir.path()).ok());
   const auto path = dir.path() / "short-write";
+  auto missing = fs->FileExists(path);
+  ASSERT_TRUE(missing.ok());
+  EXPECT_FALSE(missing.value());
   auto writable = fs->OpenWritable(path, false);
   ASSERT_TRUE(writable.ok());
   const std::string expected = "complete despite short writes";
@@ -83,9 +200,85 @@ TEST(FileSystemTest, WritableFileRetriesShortWritesAndPropagatesPathErrors) {
   const std::string actual{std::istreambuf_iterator<char>(input),
                            std::istreambuf_iterator<char>()};
   EXPECT_EQ(actual, expected);
+  auto exists = fs->FileExists(path);
+  ASSERT_TRUE(exists.ok());
+  EXPECT_TRUE(exists.value());
+  EXPECT_EQ(fs->FileExists(dir.path() / std::string(5000, 'x')).status().code(),
+            tinylsm::StatusCode::kIOError);
   EXPECT_EQ(fs->Rename(dir.path() / "missing", dir.path() / "target").code(),
             tinylsm::StatusCode::kIOError);
   EXPECT_EQ(fs->SyncDir(dir.path() / "missing").code(), tinylsm::StatusCode::kIOError);
+}
+
+TEST(DBErrorTest, FileExistsFailureIsPropagatedWithOpenContext) {
+  TempDir dir;
+  auto state = std::make_shared<FaultState>();
+  state->fail_file_exists_once = true;
+  auto opened =
+      tinylsm::internal::DBTestPeer::Open(dir.path(), {}, FaultFileSystem(state));
+  ASSERT_FALSE(opened.ok());
+  EXPECT_EQ(opened.status().code(), tinylsm::StatusCode::kIOError);
+  EXPECT_NE(opened.status().message().find("open database"), std::string::npos);
+}
+
+TEST(DBErrorTest, SyncFailureLeavesDatabaseOpenAndCloseCanBeRetried) {
+  TempDir dir;
+  auto state = std::make_shared<FaultState>();
+  auto opened =
+      tinylsm::internal::DBTestPeer::Open(dir.path(), {}, FaultFileSystem(state));
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+  state->fail_sync_once = true;
+  EXPECT_EQ(opened.value()->Close().code(), tinylsm::StatusCode::kIOError);
+  EXPECT_TRUE(opened.value()->Put("still-open", "value").ok());
+  EXPECT_TRUE(opened.value()->Close().ok());
+}
+
+TEST(DBErrorTest, CloseFailureStillTransitionsDatabaseToClosed) {
+  TempDir dir;
+  auto state = std::make_shared<FaultState>();
+  auto opened =
+      tinylsm::internal::DBTestPeer::Open(dir.path(), {}, FaultFileSystem(state));
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+  state->fail_close_once = true;
+  EXPECT_EQ(opened.value()->Close().code(), tinylsm::StatusCode::kIOError);
+  EXPECT_EQ(opened.value()->Get("key").status().code(),
+            tinylsm::StatusCode::kAlreadyClosed);
+}
+
+TEST(DBErrorTest, StandardExceptionsPropagateThroughThePublicApi) {
+  TempDir dir;
+  auto state = std::make_shared<FaultState>();
+  auto opened =
+      tinylsm::internal::DBTestPeer::Open(dir.path(), {}, FaultFileSystem(state));
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+  state->throw_append_once = true;
+  EXPECT_THROW(static_cast<void>(opened.value()->Put("key", "value")),
+               std::runtime_error);
+  EXPECT_TRUE(opened.value()->Close().ok());
+}
+
+TEST(DBErrorTest, ExhaustedRecoveredSequenceUsesResourceStatus) {
+  TempDir dir;
+  auto fs = tinylsm::internal::NewPosixFileSystem();
+  ASSERT_TRUE(fs->CreateDir(dir.path()).ok());
+  auto wal = fs->OpenWritable(dir.path() / "000001.wal", false);
+  ASSERT_TRUE(wal.ok());
+  ASSERT_TRUE(wal.value()->Sync().ok());
+  ASSERT_TRUE(wal.value()->Close().ok());
+
+  tinylsm::internal::ManifestSnapshot snapshot;
+  snapshot.active_wal_number = 1;
+  snapshot.next_file_number = 2;
+  snapshot.last_sequence = std::numeric_limits<std::uint64_t>::max();
+  tinylsm::internal::ManifestState manifest(*fs, dir.path(), snapshot);
+  ASSERT_TRUE(manifest.Publish(snapshot).ok());
+
+  auto opened = tinylsm::DB::Open(dir.path());
+  ASSERT_FALSE(opened.ok());
+  EXPECT_EQ(opened.status().code(), tinylsm::StatusCode::kResourceExhausted);
 }
 
 TEST(DBTest, InMemoryDistinguishesMissingEmptyAndTombstone) {

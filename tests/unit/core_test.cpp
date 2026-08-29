@@ -4,10 +4,13 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <stdexcept>
 
 #include "manifest/manifest_codec.h"
 #include "memtable/memtable.h"
 #include "sstable/sstable_format.h"
+#include "tinylsm/result.h"
 #include "util/coding.h"
 #include "wal/wal_reader.h"
 #include "wal/wal_record_codec.h"
@@ -33,6 +36,41 @@ private:
   std::size_t offset_ = 0;
 };
 } // namespace
+
+TEST(StatusTest, PreservesCodeWhileAddingDiagnosticContext) {
+  const auto status = tinylsm::Status::IOError("read file").WithContext("replay WAL");
+  EXPECT_EQ(status.code(), tinylsm::StatusCode::kIOError);
+  EXPECT_EQ(status.message(), "replay WAL: read file");
+  EXPECT_EQ(status.ToString(), "IOError: replay WAL: read file");
+  EXPECT_EQ(tinylsm::Status::Ok().WithContext("unused").ToString(), "OK");
+  EXPECT_EQ(tinylsm::Status::ResourceExhausted("sequence space").code(),
+            tinylsm::StatusCode::kResourceExhausted);
+}
+
+TEST(ResultTest, EnforcesValueOrErrorInvariantInAllBuildModes) {
+  tinylsm::Result<std::string> value("ready");
+  ASSERT_TRUE(value.ok());
+  EXPECT_EQ(*value, "ready");
+  EXPECT_EQ(value->size(), 5U);
+
+  tinylsm::Result<std::unique_ptr<int>> move_only(std::make_unique<int>(42));
+  ASSERT_TRUE(move_only.ok());
+  EXPECT_EQ(**move_only, 42);
+
+  tinylsm::Result<int> error(tinylsm::Status::NotFound("missing"));
+  ASSERT_FALSE(error.ok());
+  try {
+    static_cast<void>(error.value());
+    FAIL() << "value() should reject an error Result";
+  } catch (const tinylsm::BadResultAccess& access) {
+    EXPECT_EQ(access.status().code(), tinylsm::StatusCode::kNotFound);
+    EXPECT_NE(std::string(access.what()).find("missing"), std::string::npos);
+  }
+
+  EXPECT_THROW(static_cast<void>(tinylsm::Result<int>(tinylsm::Status::Ok())),
+               std::invalid_argument);
+  EXPECT_EQ(tinylsm::Result<int>(7).value(), 7);
+}
 
 TEST(MemTableTest, PreservesEmptyValueTombstoneAndSequenceRules) {
   ti::MemTable table;
