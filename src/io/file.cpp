@@ -77,6 +77,7 @@ public:
   }
   Status Append(std::span<const std::byte> data) override {
     std::size_t done = 0;
+
     while (done < data.size()) {
       const std::ptrdiff_t n =
           write_function_(fd_, data.data() + done, data.size() - done);
@@ -84,12 +85,14 @@ public:
         done += static_cast<std::size_t>(n);
         continue;
       }
+
       if (n < 0 && errno == EINTR)
         continue;
       if (n == 0)
         errno = EIO;
       return Error("write", path_);
     }
+
     return Status::Ok();
   }
   Status Sync() override {
@@ -150,6 +153,7 @@ public:
     for (std::filesystem::directory_iterator it(p, ec), end; !ec && it != end;
          it.increment(ec))
       out.push_back(it->path());
+
     if (ec)
       return Status::IOError("list directory " + p.string() + ": " + ec.message());
     return out;
@@ -177,11 +181,13 @@ public:
     int fd = ::open(p.c_str(), O_RDONLY);
     if (fd < 0)
       return Error("open directory", p);
+
     if (::fsync(fd) != 0) {
       auto s = Error("fsync directory", p);
       ::close(fd);
       return s;
     }
+
     if (::close(fd) != 0)
       return Error("close directory", p);
     return Status::Ok();
