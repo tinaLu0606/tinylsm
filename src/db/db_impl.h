@@ -33,6 +33,12 @@ public:
 private:
   Impl() = default;
 
+  Status EnsureDatabaseDirectory();
+  Result<internal::ManifestSnapshot> LoadManifest();
+  Result<internal::ManifestSnapshot> CreateInitialManifest();
+  Status OpenManifestSSTable(const internal::ManifestSnapshot& snapshot);
+  Status RecoverActiveWal(const internal::ManifestSnapshot& snapshot);
+
   /// Performs the WAL-first write path and may synchronously trigger the first
   /// V2 flush. A flush error can occur after the record was accepted earlier.
   Status Write(std::string_view key, std::string_view value, internal::ValueType type);
@@ -49,6 +55,9 @@ private:
   std::unique_ptr<internal::WalWriter> wal_;
   std::unique_ptr<internal::SSTableReader> table_;
   std::unique_ptr<internal::ManifestState> manifest_;
+  /// Set when the authoritative on-disk Manifest is uncertain. Close remains
+  /// available, but every data operation fails until the caller reopens the DB.
+  std::optional<Status> terminal_error_;
   std::uint64_t next_sequence_ = 1;
   bool closed_ = false;
 };

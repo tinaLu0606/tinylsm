@@ -51,6 +51,8 @@ public:
   /// the durability policy selected by Options::sync_on_write. An error Status or
   /// propagated exception may occur after the WAL or MemTable has accepted the
   /// write, so callers must not assume that a failed Put left the key unchanged.
+  /// A persistence error can make the current handle unusable; in that state all
+  /// later data operations fail until the caller closes and reopens the DB.
   Status Put(std::string_view key, std::string_view value);
 
   /// Returns the current value for `key`.
@@ -62,7 +64,8 @@ public:
   /// Deletes `key` by recording a tombstone.
   ///
   /// As with Put(), an error Status or propagated exception may occur after the
-  /// delete was accepted by an earlier stage of the write path.
+  /// delete was accepted by an earlier stage of the write path. A persistence
+  /// error can require closing and reopening the DB before further operations.
   Status Delete(std::string_view key);
 
   /// Returns live entries in byte-wise key order over the range [begin, end).
@@ -75,6 +78,7 @@ public:
   ///
   /// A sync failure leaves the DB open so the caller may retry. Once the
   /// underlying close is attempted, the DB is closed even if close reports an error.
+  /// A successful Close returns OK even if an earlier operation required reopen.
   Status Close();
 
 private:

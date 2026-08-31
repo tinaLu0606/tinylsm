@@ -48,94 +48,138 @@ DB::Impl::Open(const std::filesystem::path& path, Options options,
   impl->path_ = path;
   impl->fs_ = std::move(fs);
 
-  auto path_exists = impl->fs_->FileExists(path);
-  if (!path_exists.ok())
-    return path_exists.status().WithContext("open database");
-  if (!path_exists.value()) {
-    if (!options.create_if_missing)
-      return Status::NotFound("database directory does not exist");
-    auto s = impl->fs_->CreateDir(path);
-    if (!s.ok())
-      return s.WithContext("create database directory");
-  }
+  auto s = impl->EnsureDatabaseDirectory();
+  if (!s.ok())
+    return s;
 
   const auto manifest_path = path / "MANIFEST";
-  internal::ManifestSnapshot snapshot;
-
   auto manifest_exists = impl->fs_->FileExists(manifest_path);
   if (!manifest_exists.ok())
     return manifest_exists.status().WithContext("inspect MANIFEST");
-  if (manifest_exists.value()) {
-    auto loaded = internal::ManifestState::Load(*impl->fs_, path);
-    if (!loaded.ok())
-      return loaded.status().WithContext("load MANIFEST");
-    snapshot = std::move(loaded.value());
-  } else {
-    if (!options.create_if_missing)
-      return Status::NotFound("database manifest does not exist");
 
-    snapshot.active_wal_number = 1;
-    snapshot.next_file_number = 2;
-
-    auto initial = impl->fs_->OpenWritable(path / WalName(1), false);
-    if (!initial.ok())
-      return initial.status().WithContext("create initial WAL");
-    auto s = initial.value()->Sync();
-    if (!s.ok())
-      return s.WithContext("sync initial WAL");
-    s = initial.value()->Close();
-    if (!s.ok())
-      return s.WithContext("close initial WAL");
-
-    internal::ManifestState state(*impl->fs_, path, snapshot);
-    s = state.Publish(snapshot);
-    if (!s.ok())
-      return s.WithContext("publish initial MANIFEST");
-  }
+  auto loaded =
+      manifest_exists.value() ? impl->LoadManifest() : impl->CreateInitialManifest();
+  if (!loaded.ok())
+    return loaded.status();
+  auto snapshot = std::move(loaded.value());
 
   impl->manifest_ =
       std::make_unique<internal::ManifestState>(*impl->fs_, path, snapshot);
 
-  if (snapshot.live_table) {
-    const auto sst_path = path / SstName(snapshot.live_table->file_number);
-    auto table_exists = impl->fs_->FileExists(sst_path);
-    if (!table_exists.ok())
-      return table_exists.status().WithContext("inspect Manifest SSTable");
-    if (!table_exists.value())
-      return Status::Corruption("manifest references a missing SSTable");
-    auto f = impl->fs_->OpenRandomAccess(sst_path);
-    if (!f.ok())
-      return f.status().WithContext("open Manifest SSTable");
+  s = impl->OpenManifestSSTable(snapshot);
+  if (!s.ok())
+    return s;
 
-    auto actual_size = f.value()->Size();
-    if (!actual_size.ok())
-      return actual_size.status().WithContext("read Manifest SSTable size");
-    if (actual_size.value() != snapshot.live_table->file_size)
-      return Status::Corruption("manifest SSTable size does not match file");
+  s = impl->RecoverActiveWal(snapshot);
+  if (!s.ok())
+    return s;
 
-    auto reader = internal::SSTableReader::Open(std::move(f.value()));
-    if (!reader.ok())
-      return reader.status().WithContext("validate Manifest SSTable");
-    impl->table_ = std::move(reader.value());
+  return impl;
+}
+
+Status DB::Impl::EnsureDatabaseDirectory() {
+  auto path_exists = fs_->FileExists(*path_);
+  if (!path_exists.ok())
+    return path_exists.status().WithContext("open database");
+  if (path_exists.value())
+    return Status::Ok();
+
+  if (!options_.create_if_missing)
+    return Status::NotFound("database directory does not exist");
+
+  auto s = fs_->CreateDir(*path_);
+  return s.ok() ? s : s.WithContext("create database directory");
+}
+
+Result<internal::ManifestSnapshot> DB::Impl::LoadManifest() {
+  auto loaded = internal::ManifestState::Load(*fs_, *path_);
+  if (!loaded.ok())
+    return loaded.status().WithContext("load MANIFEST");
+  return std::move(loaded.value());
+}
+
+Result<internal::ManifestSnapshot> DB::Impl::CreateInitialManifest() {
+  if (!options_.create_if_missing)
+    return Status::NotFound("database manifest does not exist");
+
+  internal::ManifestSnapshot snapshot;
+  snapshot.active_wal_number = 1;
+  snapshot.next_file_number = 2;
+
+  auto initial = fs_->OpenWritable(*path_ / WalName(1), false);
+  if (!initial.ok())
+    return initial.status().WithContext("create initial WAL");
+
+  auto s = initial.value()->Sync();
+  if (!s.ok())
+    return s.WithContext("sync initial WAL");
+
+  s = initial.value()->Close();
+  if (!s.ok())
+    return s.WithContext("close initial WAL");
+
+  internal::ManifestState state(*fs_, *path_, snapshot);
+  auto published = state.Publish(snapshot);
+  if (!published.durable()) {
+    const auto context =
+        published.state() == internal::ManifestPublishState::kVisibleNotDurable
+            ? "publish initial MANIFEST: replacement may be visible; retry DB::Open"
+            : "publish initial MANIFEST";
+    return published.status().WithContext(context);
   }
 
-  const auto wal_path = path / WalName(snapshot.active_wal_number);
-  auto wal_exists = impl->fs_->FileExists(wal_path);
+  return snapshot;
+}
+
+Status DB::Impl::OpenManifestSSTable(const internal::ManifestSnapshot& snapshot) {
+  if (!snapshot.live_table)
+    return Status::Ok();
+
+  const auto sst_path = *path_ / SstName(snapshot.live_table->file_number);
+  auto table_exists = fs_->FileExists(sst_path);
+  if (!table_exists.ok())
+    return table_exists.status().WithContext("inspect Manifest SSTable");
+  if (!table_exists.value())
+    return Status::Corruption("manifest references a missing SSTable");
+
+  auto file = fs_->OpenRandomAccess(sst_path);
+  if (!file.ok())
+    return file.status().WithContext("open Manifest SSTable");
+
+  auto actual_size = file.value()->Size();
+  if (!actual_size.ok())
+    return actual_size.status().WithContext("read Manifest SSTable size");
+  if (actual_size.value() != snapshot.live_table->file_size)
+    return Status::Corruption("manifest SSTable size does not match file");
+
+  auto reader = internal::SSTableReader::Open(std::move(file.value()));
+  if (!reader.ok())
+    return reader.status().WithContext("validate Manifest SSTable");
+
+  table_ = std::move(reader.value());
+  return Status::Ok();
+}
+
+Status DB::Impl::RecoverActiveWal(const internal::ManifestSnapshot& snapshot) {
+  const auto wal_path = *path_ / WalName(snapshot.active_wal_number);
+  auto wal_exists = fs_->FileExists(wal_path);
   if (!wal_exists.ok())
     return wal_exists.status().WithContext("inspect active WAL");
   if (!wal_exists.value())
     return Status::Corruption("manifest references a missing WAL");
-  auto seq = impl->fs_->OpenSequential(wal_path);
+
+  auto seq = fs_->OpenSequential(wal_path);
   if (!seq.ok())
     return seq.status().WithContext("open active WAL for replay");
 
-  internal::WalReader reader(std::move(seq.value()), Limits(options));
+  internal::WalReader reader(std::move(seq.value()), Limits(options_));
   auto replay = reader.Replay(
-      [&](const internal::InternalEntry& e) { return impl->memtable_.Apply(e); });
+      [&](const internal::InternalEntry& e) { return memtable_.Apply(e); });
   if (!replay.ok())
     return replay.status().WithContext("replay active WAL");
+
   if (replay.value().truncated_tail) {
-    auto s = impl->fs_->Truncate(wal_path, replay.value().valid_bytes);
+    auto s = fs_->Truncate(wal_path, replay.value().valid_bytes);
     if (!s.ok())
       return s.WithContext("truncate incomplete WAL tail");
   }
@@ -143,18 +187,20 @@ DB::Impl::Open(const std::filesystem::path& path, Options options,
   const auto max_seq = std::max(snapshot.last_sequence, replay.value().max_sequence);
   if (max_seq == std::numeric_limits<std::uint64_t>::max())
     return Status::ResourceExhausted("sequence space is exhausted");
-  impl->next_sequence_ = max_seq + 1;
+  next_sequence_ = max_seq + 1;
 
-  auto writable = impl->fs_->OpenWritable(wal_path, true);
+  auto writable = fs_->OpenWritable(wal_path, true);
   if (!writable.ok())
     return writable.status().WithContext("open active WAL for append");
-  impl->wal_ = std::make_unique<internal::WalWriter>(std::move(writable.value()),
-                                                     Limits(options));
-  return impl;
+  wal_ = std::make_unique<internal::WalWriter>(std::move(writable.value()),
+                                               Limits(options_));
+  return Status::Ok();
 }
 
 Status DB::Impl::CheckOpen() const {
-  return closed_ ? Status::AlreadyClosed("database is closed") : Status::Ok();
+  if (closed_)
+    return Status::AlreadyClosed("database is closed");
+  return terminal_error_.value_or(Status::Ok());
 }
 Status DB::Impl::Put(std::string_view k, std::string_view v) {
   return Write(k, v, internal::ValueType::kValue);
@@ -276,9 +322,16 @@ Status DB::Impl::FlushMemTable() {
 
   // This is the flush commit point. Before it succeeds, the old Manifest, WAL,
   // and MemTable remain authoritative even if orphan files were created.
-  s = manifest_->Publish(next);
-  if (!s.ok())
-    return s.WithContext("publish flush MANIFEST");
+  auto published = manifest_->Publish(next);
+  if (!published.durable()) {
+    if (published.state() == internal::ManifestPublishState::kVisibleNotDurable) {
+      terminal_error_ = published.status().WithContext(
+          "publish flush MANIFEST: replacement may be visible; close and reopen "
+          "the database");
+      return *terminal_error_;
+    }
+    return published.status().WithContext("publish flush MANIFEST");
+  }
 
   // Everything below is an in-memory ownership switch or best-effort cleanup;
   // the newly published state must remain successful once committed.

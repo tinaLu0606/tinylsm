@@ -1,7 +1,6 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
-#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <limits>
@@ -16,135 +15,15 @@
 #include "manifest/manifest_state.h"
 #include "sstable/sstable_builder.h"
 #include "sstable/sstable_reader.h"
+#include "test_support/fault_injection_fs.h"
+#include "test_support/temp_dir.h"
 #include "tinylsm/db.h"
 #include "util/coding.h"
 
 namespace {
-class TempDir {
-public:
-  TempDir() {
-    path_ =
-        std::filesystem::temp_directory_path() /
-        ("tinylsm-test-" + std::to_string(::getpid()) + "-" +
-         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
-  }
-  ~TempDir() {
-    std::error_code error;
-    std::filesystem::remove_all(path_, error);
-  }
-  const std::filesystem::path& path() const { return path_; }
-
-private:
-  std::filesystem::path path_;
-};
-
-struct FaultState {
-  bool fail_file_exists_once = false;
-  bool fail_sync_once = false;
-  bool fail_close_once = false;
-  bool throw_append_once = false;
-};
-
-class FaultWritableFile final : public tinylsm::internal::WritableFile {
-public:
-  FaultWritableFile(std::unique_ptr<tinylsm::internal::WritableFile> inner,
-                    std::shared_ptr<FaultState> state)
-      : inner_(std::move(inner)), state_(std::move(state)) {}
-
-  tinylsm::Status Append(std::span<const std::byte> data) override {
-    if (std::exchange(state_->throw_append_once, false))
-      throw std::runtime_error("injected append exception");
-    return inner_->Append(data);
-  }
-
-  tinylsm::Status Sync() override {
-    if (std::exchange(state_->fail_sync_once, false))
-      return tinylsm::Status::IOError("injected sync failure");
-    return inner_->Sync();
-  }
-
-  tinylsm::Status Close() override {
-    if (!std::exchange(state_->fail_close_once, false))
-      return inner_->Close();
-    auto closed = inner_->Close();
-    if (!closed.ok())
-      return closed;
-    return tinylsm::Status::IOError("injected close failure");
-  }
-
-private:
-  std::unique_ptr<tinylsm::internal::WritableFile> inner_;
-  std::shared_ptr<FaultState> state_;
-};
-
-class FaultInjectionFileSystem final : public tinylsm::internal::FileSystem {
-public:
-  FaultInjectionFileSystem(std::unique_ptr<tinylsm::internal::FileSystem> inner,
-                           std::shared_ptr<FaultState> state)
-      : inner_(std::move(inner)), state_(std::move(state)) {}
-
-  tinylsm::Result<std::unique_ptr<tinylsm::internal::SequentialFile>>
-  OpenSequential(const std::filesystem::path& path) override {
-    return inner_->OpenSequential(path);
-  }
-
-  tinylsm::Result<std::unique_ptr<tinylsm::internal::RandomAccessFile>>
-  OpenRandomAccess(const std::filesystem::path& path) override {
-    return inner_->OpenRandomAccess(path);
-  }
-
-  tinylsm::Result<std::unique_ptr<tinylsm::internal::WritableFile>>
-  OpenWritable(const std::filesystem::path& path, bool append) override {
-    auto file = inner_->OpenWritable(path, append);
-    if (!file.ok())
-      return file.status();
-    return std::unique_ptr<tinylsm::internal::WritableFile>(
-        new FaultWritableFile(std::move(file.value()), state_));
-  }
-
-  tinylsm::Status CreateDir(const std::filesystem::path& path) override {
-    return inner_->CreateDir(path);
-  }
-
-  tinylsm::Result<std::vector<std::filesystem::path>>
-  ListDir(const std::filesystem::path& path) override {
-    return inner_->ListDir(path);
-  }
-
-  tinylsm::Status Rename(const std::filesystem::path& from,
-                         const std::filesystem::path& to) override {
-    return inner_->Rename(from, to);
-  }
-
-  tinylsm::Status Remove(const std::filesystem::path& path) override {
-    return inner_->Remove(path);
-  }
-
-  tinylsm::Status Truncate(const std::filesystem::path& path,
-                           std::uint64_t size) override {
-    return inner_->Truncate(path, size);
-  }
-
-  tinylsm::Result<bool> FileExists(const std::filesystem::path& path) override {
-    if (std::exchange(state_->fail_file_exists_once, false))
-      return tinylsm::Status::IOError("injected exists failure");
-    return inner_->FileExists(path);
-  }
-
-  tinylsm::Status SyncDir(const std::filesystem::path& path) override {
-    return inner_->SyncDir(path);
-  }
-
-private:
-  std::unique_ptr<tinylsm::internal::FileSystem> inner_;
-  std::shared_ptr<FaultState> state_;
-};
-
-std::unique_ptr<tinylsm::internal::FileSystem>
-FaultFileSystem(const std::shared_ptr<FaultState>& state) {
-  return std::make_unique<FaultInjectionFileSystem>(
-      tinylsm::internal::NewPosixFileSystem(), state);
-}
+using tinylsm::test::FaultOperation;
+using tinylsm::test::FaultTiming;
+using tinylsm::test::TempDir;
 } // namespace
 
 TEST(SstableTest, BuildsMultipleBlocksAndReadsBoundaryKeys) {
@@ -212,10 +91,10 @@ TEST(FileSystemTest, WritableFileRetriesShortWritesAndPropagatesPathErrors) {
 
 TEST(DBErrorTest, FileExistsFailureIsPropagatedWithOpenContext) {
   TempDir dir;
-  auto state = std::make_shared<FaultState>();
-  state->fail_file_exists_once = true;
-  auto opened =
-      tinylsm::internal::DBTestPeer::Open(dir.path(), {}, FaultFileSystem(state));
+  auto plan = std::make_shared<tinylsm::test::FaultPlan>();
+  plan->Fail(FaultOperation::kFileExists);
+  auto opened = tinylsm::internal::DBTestPeer::Open(
+      dir.path(), {}, tinylsm::test::NewFaultInjectionFileSystem(plan));
   ASSERT_FALSE(opened.ok());
   EXPECT_EQ(opened.status().code(), tinylsm::StatusCode::kIOError);
   EXPECT_NE(opened.status().message().find("open database"), std::string::npos);
@@ -223,12 +102,12 @@ TEST(DBErrorTest, FileExistsFailureIsPropagatedWithOpenContext) {
 
 TEST(DBErrorTest, SyncFailureLeavesDatabaseOpenAndCloseCanBeRetried) {
   TempDir dir;
-  auto state = std::make_shared<FaultState>();
-  auto opened =
-      tinylsm::internal::DBTestPeer::Open(dir.path(), {}, FaultFileSystem(state));
+  auto plan = std::make_shared<tinylsm::test::FaultPlan>();
+  auto opened = tinylsm::internal::DBTestPeer::Open(
+      dir.path(), {}, tinylsm::test::NewFaultInjectionFileSystem(plan));
   ASSERT_TRUE(opened.ok()) << opened.status().ToString();
 
-  state->fail_sync_once = true;
+  plan->Fail(FaultOperation::kSync, ".wal");
   EXPECT_EQ(opened.value()->Close().code(), tinylsm::StatusCode::kIOError);
   EXPECT_TRUE(opened.value()->Put("still-open", "value").ok());
   EXPECT_TRUE(opened.value()->Close().ok());
@@ -236,12 +115,12 @@ TEST(DBErrorTest, SyncFailureLeavesDatabaseOpenAndCloseCanBeRetried) {
 
 TEST(DBErrorTest, CloseFailureStillTransitionsDatabaseToClosed) {
   TempDir dir;
-  auto state = std::make_shared<FaultState>();
-  auto opened =
-      tinylsm::internal::DBTestPeer::Open(dir.path(), {}, FaultFileSystem(state));
+  auto plan = std::make_shared<tinylsm::test::FaultPlan>();
+  auto opened = tinylsm::internal::DBTestPeer::Open(
+      dir.path(), {}, tinylsm::test::NewFaultInjectionFileSystem(plan));
   ASSERT_TRUE(opened.ok()) << opened.status().ToString();
 
-  state->fail_close_once = true;
+  plan->Fail(FaultOperation::kClose, ".wal", 1, FaultTiming::kAfter);
   EXPECT_EQ(opened.value()->Close().code(), tinylsm::StatusCode::kIOError);
   EXPECT_EQ(opened.value()->Get("key").status().code(),
             tinylsm::StatusCode::kAlreadyClosed);
@@ -249,12 +128,12 @@ TEST(DBErrorTest, CloseFailureStillTransitionsDatabaseToClosed) {
 
 TEST(DBErrorTest, StandardExceptionsPropagateThroughThePublicApi) {
   TempDir dir;
-  auto state = std::make_shared<FaultState>();
-  auto opened =
-      tinylsm::internal::DBTestPeer::Open(dir.path(), {}, FaultFileSystem(state));
+  auto plan = std::make_shared<tinylsm::test::FaultPlan>();
+  auto opened = tinylsm::internal::DBTestPeer::Open(
+      dir.path(), {}, tinylsm::test::NewFaultInjectionFileSystem(plan));
   ASSERT_TRUE(opened.ok()) << opened.status().ToString();
 
-  state->throw_append_once = true;
+  plan->Throw(FaultOperation::kAppend, ".wal");
   EXPECT_THROW(static_cast<void>(opened.value()->Put("key", "value")),
                std::runtime_error);
   EXPECT_TRUE(opened.value()->Close().ok());
@@ -274,7 +153,7 @@ TEST(DBErrorTest, ExhaustedRecoveredSequenceUsesResourceStatus) {
   snapshot.next_file_number = 2;
   snapshot.last_sequence = std::numeric_limits<std::uint64_t>::max();
   tinylsm::internal::ManifestState manifest(*fs, dir.path(), snapshot);
-  ASSERT_TRUE(manifest.Publish(snapshot).ok());
+  ASSERT_TRUE(manifest.Publish(snapshot).durable());
 
   auto opened = tinylsm::DB::Open(dir.path());
   ASSERT_FALSE(opened.ok());
