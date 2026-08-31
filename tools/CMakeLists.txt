@@ -1,5 +1,12 @@
+add_library(tinylsm_cli_app STATIC cli/cli_app.cpp)
+target_include_directories(tinylsm_cli_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(tinylsm_cli_app PUBLIC tinylsm::tinylsm)
+target_compile_features(tinylsm_cli_app PUBLIC cxx_std_20)
+tinylsm_set_warnings(tinylsm_cli_app)
+tinylsm_enable_sanitizers(tinylsm_cli_app)
+
 add_executable(tinylsm_cli tinylsm_cli.cpp)
-target_link_libraries(tinylsm_cli PRIVATE tinylsm::tinylsm)
+target_link_libraries(tinylsm_cli PRIVATE tinylsm_cli_app)
 target_compile_features(tinylsm_cli PRIVATE cxx_std_20)
 tinylsm_set_warnings(tinylsm_cli)
 tinylsm_enable_sanitizers(tinylsm_cli)

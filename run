@@ -13,7 +13,7 @@ Commands:
   configure [preset]   Configure the project (default: dev-debug)
   build [preset]       Configure and build the project
   test [preset]        Configure, build, and run CTest
-  cli [-- args...]     Build and run tinylsm_cli when V0 provides it
+  cli [-- args...]     Build and run tinylsm_cli
   format [--check]     Format sources or verify formatting
   lint [preset]        Run clang-tidy using the preset compilation database
   asan                 Build and test with ASan + UBSan

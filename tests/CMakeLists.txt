@@ -8,7 +8,15 @@ add_executable(tinylsm_tests
   test_support/fault_injection_fs.cpp
   test_support/temp_dir.cpp
 )
-target_link_libraries(tinylsm_tests PRIVATE tinylsm::tinylsm GTest::gtest_main)
+target_link_libraries(tinylsm_tests PRIVATE GTest::gtest_main)
+
+if(TARGET tinylsm_cli_app)
+  target_sources(tinylsm_tests PRIVATE integration/cli_test.cpp)
+  target_link_libraries(tinylsm_tests PRIVATE tinylsm_cli_app)
+else()
+  target_link_libraries(tinylsm_tests PRIVATE tinylsm::tinylsm)
+endif()
+
 target_include_directories(tinylsm_tests PRIVATE
   ${PROJECT_SOURCE_DIR}/src
   ${PROJECT_SOURCE_DIR}/tests
