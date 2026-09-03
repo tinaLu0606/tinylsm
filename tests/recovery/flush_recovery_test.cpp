@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -48,6 +49,11 @@ struct PublishFaultCase {
   const char* suffix;
   FaultTiming timing = FaultTiming::kBefore;
 };
+
+std::string ReadFile(const std::filesystem::path& path) {
+  std::ifstream input(path, std::ios::binary);
+  return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
 
 } // namespace
 
@@ -215,6 +221,77 @@ TEST(FlushRecoveryTest, InitialManifestSyncDirFailureCanBeRecoveredByOpen) {
   auto reopened = tinylsm::DB::Open(dir.path());
   ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
   EXPECT_TRUE(reopened.value()->Put("key", "value").ok());
+}
+
+TEST(FlushRecoveryTest, InitialCreationFailuresCanBeRetriedSafely) {
+  const std::vector<PublishFaultCase> cases{
+      {FaultOperation::kOpenWritable, "000001.wal"},
+      {FaultOperation::kSync, "000001.wal"},
+      {FaultOperation::kClose, "000001.wal", FaultTiming::kAfter},
+      {FaultOperation::kOpenWritable, "MANIFEST.tmp"},
+      {FaultOperation::kAppend, "MANIFEST.tmp"},
+      {FaultOperation::kSync, "MANIFEST.tmp"},
+      {FaultOperation::kClose, "MANIFEST.tmp", FaultTiming::kAfter},
+      {FaultOperation::kRename, "MANIFEST"},
+  };
+
+  for (const auto& fault : cases) {
+    SCOPED_TRACE(fault.suffix);
+    TempDir dir;
+    auto plan = std::make_shared<FaultPlan>();
+    plan->Fail(fault.operation, fault.suffix, 1, fault.timing);
+    auto first = tinylsm::internal::DBTestPeer::Open(
+        dir.path(), {}, tinylsm::test::NewFaultInjectionFileSystem(plan));
+    ASSERT_FALSE(first.ok());
+    EXPECT_EQ(first.status().code(), tinylsm::StatusCode::kIOError);
+
+    auto reopened = tinylsm::DB::Open(dir.path());
+    ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
+    EXPECT_TRUE(reopened.value()->Put("key", "value").ok());
+    EXPECT_TRUE(reopened.value()->Close().ok());
+  }
+}
+
+TEST(FlushRecoveryTest, NonEmptyPreManifestWalIsRejectedWithoutModification) {
+  TempDir dir;
+  std::filesystem::create_directories(dir.path());
+  const auto wal = dir.path() / "000001.wal";
+  const std::string original("legacy\0wal", 10);
+  std::ofstream(wal, std::ios::binary)
+      .write(original.data(), static_cast<std::streamsize>(original.size()));
+
+  auto opened = tinylsm::DB::Open(dir.path());
+  ASSERT_FALSE(opened.ok());
+  EXPECT_EQ(opened.status().code(), tinylsm::StatusCode::kNotSupported);
+  EXPECT_EQ(ReadFile(wal), original);
+  EXPECT_FALSE(std::filesystem::exists(dir.path() / "MANIFEST"));
+}
+
+TEST(FlushRecoveryTest, ComplexPreManifestStatesAreRejectedAsCorruption) {
+  for (const std::string name :
+       {"000002.wal", "000001.sst", "000001.sst.tmp", "MANIFEST.tmp"}) {
+    SCOPED_TRACE(name);
+    TempDir dir;
+    std::filesystem::create_directories(dir.path());
+    std::ofstream file(dir.path() / name, std::ios::binary);
+    ASSERT_TRUE(file.is_open());
+
+    auto opened = tinylsm::DB::Open(dir.path());
+    ASSERT_FALSE(opened.ok());
+    EXPECT_EQ(opened.status().code(), tinylsm::StatusCode::kCorruption);
+    EXPECT_FALSE(std::filesystem::exists(dir.path() / "MANIFEST"));
+  }
+}
+
+TEST(FlushRecoveryTest, UnrelatedFilesDoNotBlockInitialCreation) {
+  TempDir dir;
+  std::filesystem::create_directories(dir.path());
+  std::ofstream(dir.path() / "notes.txt") << "unrelated";
+
+  auto opened = tinylsm::DB::Open(dir.path());
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+  EXPECT_TRUE(opened.value()->Put("key", "value").ok());
+  EXPECT_EQ(ReadFile(dir.path() / "notes.txt"), "unrelated");
 }
 
 TEST(FlushRecoveryTest, OldWalCleanupFailureDoesNotChangeCommittedSuccess) {

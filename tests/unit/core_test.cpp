@@ -99,12 +99,17 @@ TEST(WalCodecTest, HasStableHeaderAndRejectsCorruptionAndLimits) {
   auto decoded = ti::DecodeWalRecord(ti::AsBytes(bytes), {});
   ASSERT_TRUE(decoded.ok());
   EXPECT_EQ(decoded.value(), entry);
-  std::string corrupt = bytes;
-  corrupt.back() ^= 1;
-  EXPECT_EQ(ti::DecodeWalRecord(ti::AsBytes(corrupt), {}).status().code(),
+  for (const std::size_t offset : {0U, 4U, 8U, 12U}) {
+    SCOPED_TRACE(offset);
+    std::string corrupt = bytes;
+    corrupt[offset] ^= 1;
+    EXPECT_EQ(ti::DecodeWalRecord(ti::AsBytes(corrupt), {}).status().code(),
+              tinylsm::StatusCode::kCorruption);
+  }
+
+  EXPECT_EQ(ti::DecodeWalRecord(ti::AsBytes(bytes), {0, 1}).status().code(),
             tinylsm::StatusCode::kCorruption);
-  ti::DecodeLimits tiny{0, 0};
-  EXPECT_EQ(ti::DecodeWalRecord(ti::AsBytes(bytes), tiny).status().code(),
+  EXPECT_EQ(ti::DecodeWalRecord(ti::AsBytes(bytes), {1, 0}).status().code(),
             tinylsm::StatusCode::kCorruption);
 }
 

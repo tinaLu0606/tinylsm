@@ -27,4 +27,11 @@ if [[ ${#files[@]} -eq 0 ]]; then
   exit 0
 fi
 
-run_command "${clang_tidy}" -p "${build_dir}" "${files[@]}"
+lint_args=(-p "${build_dir}")
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  require_command xcrun
+  readonly sdk_path="$(xcrun --show-sdk-path)"
+  lint_args+=(--extra-arg=-isysroot "--extra-arg=${sdk_path}")
+fi
+
+run_command "${clang_tidy}" "${lint_args[@]}" "${files[@]}"

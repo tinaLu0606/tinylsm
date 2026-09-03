@@ -14,6 +14,7 @@
 #include "io/file.h"
 #include "manifest/manifest_state.h"
 #include "sstable/sstable_builder.h"
+#include "sstable/sstable_format.h"
 #include "sstable/sstable_reader.h"
 #include "test_support/fault_injection_fs.h"
 #include "test_support/temp_dir.h"
@@ -24,6 +25,19 @@ namespace {
 using tinylsm::test::FaultOperation;
 using tinylsm::test::FaultTiming;
 using tinylsm::test::TempDir;
+
+void CorruptByte(const std::filesystem::path& path, std::uint64_t offset) {
+  std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+  ASSERT_TRUE(file.is_open());
+  file.seekg(static_cast<std::streamoff>(offset));
+  char byte = 0;
+  file.read(&byte, 1);
+  ASSERT_TRUE(file.good());
+  byte ^= 1;
+  file.seekp(static_cast<std::streamoff>(offset));
+  file.write(&byte, 1);
+  ASSERT_TRUE(file.good());
+}
 } // namespace
 
 TEST(SstableTest, BuildsMultipleBlocksAndReadsBoundaryKeys) {
@@ -139,6 +153,53 @@ TEST(DBErrorTest, StandardExceptionsPropagateThroughThePublicApi) {
   EXPECT_TRUE(opened.value()->Close().ok());
 }
 
+TEST(DBErrorTest, AppendFailureChangesNeitherWalNorMemtable) {
+  TempDir dir;
+  auto plan = std::make_shared<tinylsm::test::FaultPlan>();
+  auto opened = tinylsm::internal::DBTestPeer::Open(
+      dir.path(), {}, tinylsm::test::NewFaultInjectionFileSystem(plan));
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+  const auto wal = dir.path() / "000001.wal";
+  const auto size_before = std::filesystem::file_size(wal);
+
+  plan->Fail(FaultOperation::kAppend, "000001.wal");
+  EXPECT_EQ(opened.value()->Put("key", "value").code(), tinylsm::StatusCode::kIOError);
+  EXPECT_EQ(std::filesystem::file_size(wal), size_before);
+  EXPECT_EQ(opened.value()->Get("key").status().code(), tinylsm::StatusCode::kNotFound);
+}
+
+TEST(DBErrorTest, SyncFailureLeavesWriteUnconfirmedButRecoverable) {
+  TempDir dir;
+  auto plan = std::make_shared<tinylsm::test::FaultPlan>();
+  auto opened = tinylsm::internal::DBTestPeer::Open(
+      dir.path(), {}, tinylsm::test::NewFaultInjectionFileSystem(plan));
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+  plan->Fail(FaultOperation::kSync, "000001.wal");
+  EXPECT_EQ(opened.value()->Put("key", "value").code(), tinylsm::StatusCode::kIOError);
+  EXPECT_EQ(opened.value()->Get("key").status().code(), tinylsm::StatusCode::kNotFound);
+  opened.value().reset();
+
+  auto reopened = tinylsm::DB::Open(dir.path());
+  ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
+  EXPECT_EQ(reopened.value()->Get("key").value(), "value");
+}
+
+TEST(DBErrorTest, DisabledSyncOnWriteSkipsPerWriteAndCloseSync) {
+  TempDir dir;
+  tinylsm::Options options;
+  options.sync_on_write = false;
+  auto plan = std::make_shared<tinylsm::test::FaultPlan>();
+  auto opened = tinylsm::internal::DBTestPeer::Open(
+      dir.path(), options, tinylsm::test::NewFaultInjectionFileSystem(plan));
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+  plan->Fail(FaultOperation::kSync, "000001.wal");
+  EXPECT_TRUE(opened.value()->Put("key", "value").ok());
+  EXPECT_TRUE(opened.value()->Delete("key").ok());
+  EXPECT_TRUE(opened.value()->Close().ok());
+}
+
 TEST(DBErrorTest, ExhaustedRecoveredSequenceUsesResourceStatus) {
   TempDir dir;
   auto fs = tinylsm::internal::NewPosixFileSystem();
@@ -173,6 +234,62 @@ TEST(DBTest, InMemoryDistinguishesMissingEmptyAndTombstone) {
   auto scan = db.Scan("", "z");
   ASSERT_TRUE(scan.ok());
   EXPECT_EQ(scan.value(), (std::vector<tinylsm::Entry>{{"b", "two"}}));
+}
+
+TEST(DBTest, DeleteOfMissingKeyIsIdempotent) {
+  auto opened = tinylsm::DB::OpenInMemory();
+  ASSERT_TRUE(opened.ok());
+  EXPECT_TRUE(opened.value()->Delete("missing").ok());
+  EXPECT_TRUE(opened.value()->Delete("missing").ok());
+  EXPECT_EQ(opened.value()->Get("missing").status().code(),
+            tinylsm::StatusCode::kNotFound);
+}
+
+TEST(DBTest, EnforcesKeyAndValueLimitsBeforeWalAndMemtableMutation) {
+  TempDir dir;
+  tinylsm::Options options;
+  options.max_key_bytes = 3;
+  options.max_value_bytes = 4;
+  auto opened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+  EXPECT_TRUE(opened.value()->Put("key", "data").ok());
+  const auto wal = dir.path() / "000001.wal";
+  const auto size_after_boundary = std::filesystem::file_size(wal);
+  EXPECT_EQ(opened.value()->Put("long", "data").code(),
+            tinylsm::StatusCode::kInvalidArgument);
+  EXPECT_EQ(opened.value()->Put("new", "value").code(),
+            tinylsm::StatusCode::kInvalidArgument);
+  EXPECT_EQ(std::filesystem::file_size(wal), size_after_boundary);
+  EXPECT_EQ(opened.value()->Get("long").status().code(),
+            tinylsm::StatusCode::kNotFound);
+  EXPECT_EQ(opened.value()->Get("new").status().code(), tinylsm::StatusCode::kNotFound);
+  EXPECT_EQ(opened.value()->Get("key").value(), "data");
+}
+
+TEST(DBTest, PreservesBinaryKeysValuesAndBytewiseScanOrderAcrossReopen) {
+  TempDir dir;
+  const std::string zero("\0", 1);
+  const std::string zero_high("\0\x80", 2);
+  const std::string high("\x80", 1);
+  const std::string binary_value("v\0\xff", 3);
+  {
+    auto opened = tinylsm::DB::Open(dir.path());
+    ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+    EXPECT_TRUE(opened.value()->Put(high, "high").ok());
+    EXPECT_TRUE(opened.value()->Put(zero_high, binary_value).ok());
+    EXPECT_TRUE(opened.value()->Put(zero, "zero").ok());
+    EXPECT_TRUE(opened.value()->Close().ok());
+  }
+
+  auto reopened = tinylsm::DB::Open(dir.path());
+  ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
+  EXPECT_EQ(reopened.value()->Get(zero_high).value(), binary_value);
+  auto scan = reopened.value()->Scan("", "");
+  ASSERT_TRUE(scan.ok()) << scan.status().ToString();
+  EXPECT_EQ(scan.value(),
+            (std::vector<tinylsm::Entry>{
+                {zero, "zero"}, {zero_high, binary_value}, {high, "high"}}));
 }
 
 TEST(DBTest, WalRecoveryReopensLatestValues) {
@@ -252,6 +369,52 @@ TEST(DBTest, MissingManifestReferencedTableIsCorruption) {
   std::filesystem::remove(dir.path() / "000002.sst");
   auto reopened = tinylsm::DB::Open(dir.path(), options);
   EXPECT_EQ(reopened.status().code(), tinylsm::StatusCode::kCorruption);
+}
+
+TEST(DBTest, MissingManifestReferencedWalIsCorruption) {
+  TempDir dir;
+  {
+    auto opened = tinylsm::DB::Open(dir.path());
+    ASSERT_TRUE(opened.ok());
+    ASSERT_TRUE(opened.value()->Close().ok());
+  }
+  std::filesystem::remove(dir.path() / "000001.wal");
+  auto reopened = tinylsm::DB::Open(dir.path());
+  EXPECT_EQ(reopened.status().code(), tinylsm::StatusCode::kCorruption);
+}
+
+TEST(DBTest, CorruptManifestFramingIsReportedThroughOpen) {
+  TempDir dir;
+  {
+    auto opened = tinylsm::DB::Open(dir.path());
+    ASSERT_TRUE(opened.ok());
+    ASSERT_TRUE(opened.value()->Close().ok());
+  }
+  CorruptByte(dir.path() / "MANIFEST", 0);
+  auto reopened = tinylsm::DB::Open(dir.path());
+  EXPECT_EQ(reopened.status().code(), tinylsm::StatusCode::kCorruption);
+}
+
+TEST(DBTest, CorruptReferencedIndexAndFooterAreReportedThroughOpen) {
+  for (const bool corrupt_footer : {false, true}) {
+    SCOPED_TRACE(corrupt_footer ? "footer" : "index");
+    TempDir dir;
+    tinylsm::Options options;
+    options.memtable_bytes = 128;
+    {
+      auto opened = tinylsm::DB::Open(dir.path(), options);
+      ASSERT_TRUE(opened.ok());
+      ASSERT_TRUE(opened.value()->Put("key", std::string(64, 'v')).ok());
+      ASSERT_TRUE(opened.value()->Close().ok());
+    }
+
+    const auto table = dir.path() / "000002.sst";
+    const auto size = std::filesystem::file_size(table);
+    const auto footer_start = size - tinylsm::internal::kSstableFooterSize;
+    CorruptByte(table, corrupt_footer ? footer_start : footer_start - 1);
+    auto reopened = tinylsm::DB::Open(dir.path(), options);
+    EXPECT_EQ(reopened.status().code(), tinylsm::StatusCode::kCorruption);
+  }
 }
 
 TEST(DBTest, ManifestIsAuthoritativeAndIgnoresOrphans) {
