@@ -1,10 +1,10 @@
-# 2026-08-24 · TinyLSM · V0-V2 源码设计计划
+# 2026-08-24 · TinyLSM · V0-V2 源码设计与验收记录
 
 ## 记录来源与状态
 
-- 类型：阶段计划 / AI 讨论成果
+- 类型：阶段设计 / 实现与验收记录
 - 来源：现有 [`init_plan.md`](init_plan.md)、用户对 PImpl/Protobuf 的新想法、2026-08-24 架构问答
-- 状态：`计划，待用户评审`；没有源码实现、测试结果或性能数据
+- 状态：`V0-V2 已实现并验证`；2026-08-31 完成最终验收
 - 配套文档：[`v0-v2-repository-design.md`](v0-v2-repository-design.md)、[`../notes/2026-08-24-tinylsm-v0-v2-foundations.md`](../notes/2026-08-24-tinylsm-v0-v2-foundations.md)
 
 ## 1. 目标与边界
@@ -26,19 +26,20 @@
 
 V0-V2 的目标不是生产数据库，而是建立一条可以解释、测试和故障验证的最小持久化链路。
 
-## 2. 提议中的设计决策
+## 2. 最终设计决策
 
-| 决策 | 提议 | 状态 | 理由 |
+| 决策 | 最终结果 | 状态 | 理由 |
 |---|---|---|---|
-| 顶层 API | `DB` 使用 PImpl | `建议接受，待用户确认` | V0-V2 内部成员变化大，适合隐藏依赖并稳定 public header |
-| 内部类 | 不使用 PImpl | `建议接受` | MemTable/WAL/SSTable 都是 `src/` 内部类型，无 ABI 边界需求 |
-| C++ 标准 | C++20 | `待确认` | 当前工具链支持；项目仍主要使用 C++17 可用特性 |
-| 错误模型 | `Status` + `Result<T>` | `建议接受` | 明确表达 NotFound、IOError、Corruption，不用异常表示普通控制流 |
-| Scan | V0-V2 物化为 `std::vector<Entry>` | `建议接受` | 避免提前设计跨 MemTable/SSTable 的 Iterator 生命周期 |
-| 并发 | V0-V2 不承诺线程安全 | `建议接受` | 并发计划属于 V6，先验证恢复与文件格式 |
-| WAL/Manifest 编码 | 自定义、显式、带版本的最小二进制格式 | `建议接受，待用户确认` | 训练 framing、校验、截断恢复和格式演进；避免核心依赖 Protobuf |
-| SSTable | 自定义 data/index/footer 格式 | `建议接受` | Protobuf 不适合替代有序 block/index 文件布局 |
-| V2 文件数量 | 最多一个已发布 SSTable | `按当前路线执行` | 多 SSTable 属于 V3；V2 的限制必须安全、显式 |
+| 顶层 API | `DB` 使用 PImpl | `已实现` | 隐藏内部存储依赖并保持 public header 稳定 |
+| 内部类 | 不使用 PImpl | `已实现` | MemTable/WAL/SSTable 都是 `src/` 内部类型，无 ABI 边界需求 |
+| C++ 标准 | C++20 | `已实现` | CMake targets 明确要求 `cxx_std_20` |
+| 错误模型 | `Status` + `Result<T>` | `已实现` | 普通失败使用状态码；不以异常表达 NotFound、IOError、Corruption |
+| Scan | 物化为 `std::vector<Entry>` | `已实现` | V2 只合并一个 SSTable 与 MemTable，不提前引入 Iterator 生命周期 |
+| 并发 | 不承诺线程安全 | `已冻结` | 并发属于后续阶段 |
+| WAL 编码 | 自定义 header/payload/CRC32C | `已实现` | 明确 framing、长度限制与尾部截断恢复 |
+| Manifest 编码 | 自定义 header/framing/CRC32C + Protobuf payload | `已实现` | 外层负责完整性和发布，Protobuf 表达快照 schema |
+| SSTable | 自定义 data/index/footer 格式 | `已实现` | 保留有序 block、index、footer 和独立 CRC32C |
+| V2 文件数量 | 最多一个已发布 SSTable | `已冻结` | 第二次 flush 在 WAL/MemTable 修改前返回 `NotSupported` |
 
 ## 3. 顶层系统架构
 
@@ -48,7 +49,7 @@ flowchart TD
     API --> Impl[DB::Impl coordinator]
     Impl --> Mem[MemTable]
     Impl --> WAL[WAL writer / reader]
-    Impl --> Versions[ManifestState / VersionSet]
+    Impl --> Versions[ManifestState]
     Impl --> Builder[SSTableBuilder]
     Impl --> Reader[SSTableReader]
     WAL --> IO[File IO]
@@ -89,6 +90,9 @@ struct Options {
   std::size_t memtable_bytes = 4 * 1024 * 1024;
   bool create_if_missing = true;
   bool sync_on_write = true;
+  std::uint32_t max_key_bytes = 4 * 1024 * 1024;
+  std::uint32_t max_value_bytes = 64 * 1024 * 1024;
+  std::size_t sstable_block_bytes = 16 * 1024;
 };
 
 class DB final {
@@ -134,26 +138,26 @@ class DB::Impl {
  public:
   static Result<std::unique_ptr<Impl>> OpenInMemory();
   static Result<std::unique_ptr<Impl>> Open(
-      const Path& path, const Options& options);
+      const std::filesystem::path& path, Options options);
 
   Status Put(std::string_view key, std::string_view value);
   Result<std::string> Get(std::string_view key) const;
   Status Delete(std::string_view key);
-  Result<std::vector<Entry>> Scan(KeyRange range) const;
+  Result<std::vector<Entry>> Scan(
+      std::string_view begin, std::string_view end) const;
   Status Close();
 
  private:
   Options options_;
-  std::optional<Path> db_path_;
-  MemTable memtable_;
-
-  // V1 新增
-  std::unique_ptr<WALWriter> wal_;
-  uint64_t next_sequence_ = 1;
-
-  // V2 新增
-  std::unique_ptr<ManifestState> manifest_state_;
-  std::unique_ptr<SSTableReader> table_;
+  std::optional<std::filesystem::path> path_;
+  std::unique_ptr<internal::FileSystem> fs_;
+  internal::MemTable memtable_;
+  std::unique_ptr<internal::WalWriter> wal_;
+  std::unique_ptr<internal::SSTableReader> table_;
+  std::unique_ptr<internal::ManifestState> manifest_;
+  std::optional<Status> terminal_error_;
+  std::uint64_t next_sequence_ = 1;
+  bool closed_ = false;
 };
 ```
 
@@ -177,6 +181,7 @@ enum class StatusCode {
   kInvalidArgument,
   kIOError,
   kCorruption,
+  kResourceExhausted,
   kAlreadyClosed,
   kNotSupported,
 };
@@ -277,7 +282,9 @@ sequenceDiagram
 
 所有整数使用固定 little-endian 或明确指定的 varint；第一版优先固定宽度，降低解码复杂度。
 
-V1 数据库目录中只允许一个编号 WAL，例如 `000001.wal`。因为 V1 尚无 Manifest，打开时若发现零个 WAL（且允许创建）则新建；发现一个则恢复；发现多个则返回 Corruption，不猜测哪个最新。
+开发过程中的 V1 设计曾只包含一个编号 WAL，例如 `000001.wal`。当前 V2
+持久化数据库始终以 Manifest 选择有效 WAL/SSTable；仓库没有发布过独立 V1
+格式、tag、兼容承诺或旧数据夹具，因此这段阶段设计不构成迁移兼容承诺。
 
 ```text
 RecordHeader
@@ -296,7 +303,9 @@ Payload
   value          bytes[value_length]
 ```
 
-Checksum 覆盖 `type + payload`。格式实现前需要把每个字段偏移、最大 key/value/record 大小写成常量和测试，不依赖 `sizeof(C++ struct)`。
+Checksum 覆盖 `type + payload`。字段偏移和 header 大小由常量定义，最大
+key/value 长度在分配前检查，并由 golden、字段损坏和超限测试约束；格式不依赖
+`sizeof(C++ struct)`。
 
 ### 8.2 写入时序
 
@@ -356,11 +365,17 @@ flowchart TD
 
 ## 9. V2：SSTable、Manifest 与第一次 flush
 
-V2 第一次打开一个 V1 数据库时，如果不存在 Manifest、目录中恰好只有一个合法 WAL 且没有 SSTable，则创建初始 Manifest 引用该 WAL。若目录状态更复杂或含未解释的正式 SSTable，则拒绝自动迁移并返回 Corruption，避免猜测文件归属。
+当前兼容策略不自动迁移 pre-Manifest 数据。缺少 Manifest 时：
+
+- 没有 TinyLSM 文件，创建新的 `000001.wal` 和 Manifest；
+- 只有空 `000001.wal`（可伴随 `MANIFEST.tmp`），视为初始化中断并安全重试；
+- 非空 `000001.wal` 返回 `NotSupported`，且不得截断或改写；
+- 其他编号 WAL、正式/临时 SSTable 或无法解释的初始化状态返回 `Corruption`；
+- 已有合法 Manifest 时，它仍是唯一有效文件集合，未引用 orphan 被忽略。
 
 ### 9.1 SSTable 最小格式
 
-V2 不做压缩、Bloom Filter、Block Cache。建议格式：
+V2 不做压缩、Bloom Filter、Block Cache。实际格式：
 
 ```text
 +-------------------------+
@@ -378,7 +393,9 @@ V2 不做压缩、Bloom Filter、Block Cache。建议格式：
 
 Data block 中记录按 user key 排序。每个 block 和 footer 有独立校验；Reader 先读固定大小 footer，再定位 index，最后定位可能包含 key 的 data block。
 
-V2 可以用简单的“每 N 条记录一个 index entry”，不实现前缀压缩和 restart point。
+Builder 以 `sstable_block_bytes` 作为目标大小切分 data block，每个 block 生成一条
+index entry；单个超大 entry 可以独占超过目标大小的 block。V2 不实现前缀压缩和
+restart point。
 
 ### 9.2 Manifest 快照格式
 
@@ -395,7 +412,6 @@ struct TableMeta {
 };
 
 struct ManifestSnapshot {
-  uint32_t format_version;
   uint64_t active_wal_number;
   uint64_t next_file_number;
   uint64_t last_sequence;
@@ -412,9 +428,10 @@ V2 先实现：
 ```cpp
 class ManifestState {
  public:
-  static Result<ManifestState> Recover(const Path& db_path);
-  Status Publish(const ManifestSnapshot& next);
-  const ManifestSnapshot& Current() const;
+  static Result<ManifestSnapshot> Load(
+      FileSystem& fs, const std::filesystem::path& db_path);
+  ManifestPublishOutcome Publish(const ManifestSnapshot& next);
+  const ManifestSnapshot& current() const;
 };
 ```
 
@@ -429,7 +446,6 @@ sequenceDiagram
     participant F as File/Directory
     participant M as ManifestState
     participant W as WAL
-    D->>D: stop new writes
     D->>B: build N.sst.tmp from MemTable
     B->>F: write + fsync temp SSTable
     F->>F: rename N.sst.tmp -> N.sst
@@ -441,7 +457,6 @@ sequenceDiagram
     M-->>D: durable
     D->>D: switch WAL and clear MemTable
     D->>W: close/delete old WAL
-    D->>D: resume writes
 ```
 
 发布不变量：
@@ -451,7 +466,7 @@ sequenceDiagram
 3. 新 Manifest 同时指定新 SSTable、新活跃 WAL 和 `last_sequence`；
 4. Manifest 更新前崩溃：旧 Manifest + 旧 WAL 恢复，未引用 SSTable 是 orphan；
 5. Manifest 更新后崩溃：新 SSTable + 新 WAL 恢复，旧 WAL 可在打开后清理；
-6. V2 已经存在一个 SSTable 时，可能触发第二次 flush 的 Put/Delete 必须在修改 WAL/MemTable 前返回 `NotSupported` 或 `Busy`。
+6. V2 已经存在一个 SSTable 时，可能触发第二次 flush 的 Put/Delete 必须在修改 WAL/MemTable 前返回 `NotSupported`。
 
 ### 9.5 V2 打开和读取
 
@@ -476,132 +491,87 @@ flowchart TD
 公开 `Scan` 在 V2 仍然返回物化的 `std::vector<Entry>`，但结果必须同时覆盖单个 SSTable 和当前 MemTable：
 
 ```text
-SSTable 有序记录流 + MemTable 有序记录流
-                  |
-                  v
-             two-way merge
-                  |
-         同 key 时 MemTable 更新
-                  |
-            过滤 Tombstone
-                  |
-                  v
-        vector<Entry> for [begin, end)
+SSTable::Scan + MemTable::Scan
+              |
+              v
+  写入 byte-wise ordered map
+  （MemTable 同 key 覆盖 SSTable）
+              |
+        过滤 Tombstone
+              |
+              v
+  vector<Entry> for [begin, end)
 ```
 
-这只是单 SSTable 与 MemTable 的两路物化合并，不建立 public Iterator，也不解决多 SSTable 合并。V5 再把它演化成惰性的多路合并 Iterator。
+这只是单 SSTable 与 MemTable 的物化 map 合并，不建立 public Iterator，也不解决
+多 SSTable 合并。V5 再把它演化成惰性的多路合并 Iterator。
 
-## 10. Protobuf 设计评审
+## 10. 最终编码选择
 
-### 10.1 可以怎样使用
+V0-V2 的最终组合是：
 
-如果选择 Protobuf，WAL 仍需外层 framing：
+- WAL 使用自定义 fixed-width header、显式 payload 和 CRC32C；
+- Manifest 使用自定义 magic/version/length/CRC32C framing，payload 使用
+  `ManifestSnapshotProto`；
+- SSTable 使用自定义 data block/index/footer，各部分独立校验。
 
-```text
-length | crc32c | serialized WalRecord protobuf
-```
-
-Manifest 可以把 `ManifestSnapshot` 序列化为 protobuf payload，然后继续使用：
-
-```text
-write temp -> fsync -> rename -> directory fsync
-```
-
-### 10.2 Protobuf 能解决什么
-
-- schema 和字段编号；
-- 变长字段序列化；
-- 未知字段兼容；
-- 减少手写 payload 编解码代码。
-
-### 10.3 Protobuf 不能解决什么
-
-- record framing；
-- torn/partial record 识别；
-- checksum；
-- 最大长度和资源限制；
-- `fsync`、rename 和目录同步；
-- SSTable block/index/footer；
-- 文件有效集合和发布顺序。
-
-### 10.4 当前推荐
-
-V0-V2 不直接依赖 Protobuf：
-
-- WAL、Manifest 使用小型、带版本、带 checksum 的自定义格式；
-- SSTable 必须自定义 block/index/footer；
-- 编解码代码独立为 `WalRecordCodec`、`ManifestCodec`、`BlockCodec`，并用 golden/corruption 测试约束；
-- V2 完成后可做一次实验：Manifest 自定义编码与 Protobuf 编码在代码量、文件大小、兼容性和恢复测试上的对比。
-
-理由不是“Protobuf 不好”，而是本项目的重要学习目标正是理解持久化格式和恢复边界；直接依赖 Protobuf 会隐藏一部分需要亲自掌握的问题，而且仍无法替代其他部分。
+Protobuf 负责 Manifest schema 和变长字段序列化，但不负责 framing、checksum、
+长度上限、`fsync`、rename、目录同步、有效文件集合或发布顺序。WAL 和 SSTable
+保留自定义格式，避免把 record-tail 恢复和有序 block/index 布局隐藏在序列化库后。
 
 ## 11. 测试钩子与可测试性
 
-源码层预留的测试边界：
+实际测试边界如下：
 
 - Codec 使用纯函数 `Encode/Decode`；
-- `File` 封装处理 short write、sync、rename 和错误转换；
-- `DB::Impl` 将写入、恢复、flush 拆成可观察步骤；
-- failpoint 只在测试构建启用；
-- 临时目录和文件损坏工具放在 tests/test_support，不进入 public API。
+- `FileSystem`/`WritableFile` 封装 short write、append、sync、close、rename、
+  remove、truncate 和目录同步；
+- `FaultPlan` 可以按操作、路径后缀、发生次数和操作前后注入失败；
+- `DBTestPeer` 只在内部测试中注入 FileSystem，不增加 public API；
+- 临时目录和字节损坏工具位于 `tests/test_support` 或具体测试文件。
 
-不为测试提前抽象整个 `Env` 或模拟所有系统调用；当 V1/V2 恢复测试确实需要注入失败时，再增加最小 `FileSystem` 接口或 failpoint。
+该边界足以验证 V0-V2 的系统调用失败和 reopen 语义；本阶段不模拟真实断电，也
+不抽象生产级 Env。
 
-## 12. 分阶段实现顺序与验收
+## 12. 最终验收
 
-### V0
+验证日期：2026-08-31。
 
-实现顺序：
+| 范围 | 结果 | 主要证据 |
+|---|---|---|
+| V0 | `通过` | Put/Get/Delete/Scan、空 value/NotFound、Delete 幂等、任意 byte string 与 byte-wise 顺序 |
+| V1 | `通过` | WAL golden/framing/CRC/长度限制、append/sync 失败语义、可选逐写 sync、尾部截断和 reopen |
+| V2 | `通过` | 单 SSTable flush、SSTable + MemTable 读取、第二次 flush 提前拒绝、Manifest 引用与 orphan 规则 |
+| 故障恢复 | `通过` | 初始化各阶段重试、flush commit 前后恢复、terminal state、旧 WAL 清理失败、真实 Reader/Open 损坏路径 |
+| 兼容安全 | `通过` | 非空 pre-Manifest WAL 返回 `NotSupported` 且字节不变；复杂无 Manifest 状态返回 `Corruption` |
 
-1. Status/Result/Entry；
-2. MemTable；
-3. DB PImpl façade；
-4. CLI；
-5. API、参考模型和 sanitizer 测试。
+实际执行命令：
 
-验收：Put/Get/Delete/Scan 语义正确，library/CLI/tests 构建通过，ASan/UBSan 无报告。
+```text
+./run test
+./run asan
+cmake --preset release -DBUILD_TESTING=ON
+cmake --build --preset release
+ctest --test-dir build/release --output-on-failure
+./run format --check
+./run lint dev-debug
+git diff --check
+```
 
-### V1
+Debug、Release、ASan/UBSan 均通过 45/45 tests；clang-format、clang-tidy 和
+diff whitespace 检查通过。clang-tidy 在 macOS 上由 lint 脚本显式传入当前
+Apple SDK sysroot。
 
-实现顺序：
+## 13. 冻结边界与兼容策略
 
-1. fixed-width/length-prefix/checksum 工具；
-2. File append/read/sync；
-3. WalRecordCodec；
-4. WALWriter/WALReader；
-5. DB 写路径；
-6. Open/replay；
-7. 截断、损坏、reopen 测试。
+- V0-V2 没有发布过独立旧格式，因此不承诺 pre-Manifest 自动迁移；
+- 不做真实断电实验，当前恢复证据来自系统调用故障注入、字节损坏和 reopen；
+- V2 保持同步 flush、最多一个已发布 SSTable、非线程安全；
+- 不增加 public Iterator、WriteBatch、group commit、Bloom Filter 或 Block Cache；
+- 不把未实现的多 SSTable、compaction、并发或生产 durability 描述为已完成。
 
-验收：同步成功写入可恢复；尾部截断可接受；中部损坏明确报错；失败时不产生静默错误状态。
+## 14. 后续阶段
 
-### V2
-
-实现顺序：
-
-1. DataBlock/Index/Footer codec；
-2. SSTableBuilder；
-3. SSTableReader；
-4. ManifestCodec/ManifestState；
-5. 第一次 flush；
-6. DB open/get 接入 SSTable；
-7. 发布故障点恢复测试。
-
-验收：第一次 flush 和重启读取正确；Get/Scan 能合并单 SSTable 与当前 MemTable；未 flush 数据由 WAL 恢复；半成品或 orphan 不被误用；Manifest 引用缺失/损坏文件时返回 Corruption。
-
-## 13. 待用户确认
-
-1. 是否接受只对 public `DB` 使用 PImpl？
-2. 是否接受 V0-V2 使用自定义二进制编码，并把 Protobuf 留作 V2 后对比实验？
-3. 是否采用 C++20，还是为了更广兼容性使用 C++17？
-4. 是否接受 V0-V2 不承诺线程安全，把简单并发保留到 V6？
-5. 是否接受 V2 最多一个已发布 SSTable，第二次 flush 在改变状态前明确返回不支持？
-6. V1 默认是否使用 `sync_on_write=true`，把强持久性作为初版默认语义？
-
-## 14. 对后续工作的影响
-
-本计划通过后：
-
-- 按配套仓库计划创建工程骨架并单独 commit；
-- 再从 V0 的 Status/Result/MemTable/DB PImpl 开始写代码；
-- 每个版本必须用测试证据更新状态，不能把本计划内容描述为已实现。
+V0-V2 至此冻结。多 SSTable 版本选择、compaction、并发、惰性 Iterator、CLI
+扩展、安装打包、Linux CI 和 benchmark 均留到后续路线单独设计与验收，不在本
+记录中提前展开。
