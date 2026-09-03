@@ -19,6 +19,12 @@ std::string Numbered(std::uint64_t n, std::string_view suffix) {
 }
 std::string WalName(std::uint64_t n) { return Numbered(n, ".wal"); }
 std::string SstName(std::uint64_t n) { return Numbered(n, ".sst"); }
+bool IsNumberedFile(std::string_view name, std::string_view suffix) {
+  if (name.size() != 6 + suffix.size() || !name.ends_with(suffix))
+    return false;
+  return std::all_of(name.begin(), name.begin() + 6,
+                     [](char c) { return c >= '0' && c <= '9'; });
+}
 internal::DecodeLimits Limits(const Options& o) {
   return {o.max_key_bytes, o.max_value_bytes};
 }
@@ -98,15 +104,64 @@ Result<internal::ManifestSnapshot> DB::Impl::LoadManifest() {
   return std::move(loaded.value());
 }
 
+Result<bool> DB::Impl::InspectInitialFiles() {
+  auto listed = fs_->ListDir(*path_);
+  if (!listed.ok())
+    return listed.status().WithContext("inspect database directory");
+
+  bool has_initial_wal = false;
+  bool has_manifest_temp = false;
+  for (const auto& path : listed.value()) {
+    const auto name = path.filename().string();
+    if (name == "MANIFEST.tmp") {
+      has_manifest_temp = true;
+      continue;
+    }
+    if (IsNumberedFile(name, ".wal")) {
+      if (name != WalName(1))
+        return Status::Corruption(
+            "database without MANIFEST contains an unexpected WAL");
+      has_initial_wal = true;
+      continue;
+    }
+    if (IsNumberedFile(name, ".sst") || IsNumberedFile(name, ".sst.tmp")) {
+      return Status::Corruption("database without MANIFEST contains an SSTable");
+    }
+  }
+
+  if (!has_initial_wal) {
+    if (has_manifest_temp)
+      return Status::Corruption(
+          "database without MANIFEST has an incomplete initialization state");
+    return false;
+  }
+
+  auto wal = fs_->OpenRandomAccess(*path_ / WalName(1));
+  if (!wal.ok())
+    return wal.status().WithContext("inspect pre-Manifest WAL");
+  auto size = wal.value()->Size();
+  if (!size.ok())
+    return size.status().WithContext("inspect pre-Manifest WAL size");
+  if (size.value() != 0) {
+    return Status::NotSupported(
+        "non-empty pre-Manifest WAL migration is not supported");
+  }
+  return true;
+}
+
 Result<internal::ManifestSnapshot> DB::Impl::CreateInitialManifest() {
   if (!options_.create_if_missing)
     return Status::NotFound("database manifest does not exist");
+
+  auto inspected = InspectInitialFiles();
+  if (!inspected.ok())
+    return inspected.status();
 
   internal::ManifestSnapshot snapshot;
   snapshot.active_wal_number = 1;
   snapshot.next_file_number = 2;
 
-  auto initial = fs_->OpenWritable(*path_ / WalName(1), false);
+  auto initial = fs_->OpenWritable(*path_ / WalName(1), inspected.value());
   if (!initial.ok())
     return initial.status().WithContext("create initial WAL");
 

@@ -35,6 +35,7 @@ private:
 
   Status EnsureDatabaseDirectory();
   Result<internal::ManifestSnapshot> LoadManifest();
+  Result<bool> InspectInitialFiles();
   Result<internal::ManifestSnapshot> CreateInitialManifest();
   Status OpenManifestSSTable(const internal::ManifestSnapshot& snapshot);
   Status RecoverActiveWal(const internal::ManifestSnapshot& snapshot);
