@@ -38,10 +38,6 @@ bool Matches(const internal::TableMeta& meta,
 }
 } // namespace
 
-Result<std::unique_ptr<DB::Impl>> DB::Impl::OpenInMemory() {
-  return std::unique_ptr<Impl>(new Impl());
-}
-
 Result<std::unique_ptr<DB::Impl>> DB::Impl::Open(const std::filesystem::path& path,
                                                  Options options) {
   return Open(path, std::move(options), internal::NewPosixFileSystem());

@@ -7,12 +7,6 @@ DB::DB(std::unique_ptr<Impl> impl) : impl_(std::move(impl)) {}
 DB::~DB() = default;
 DB::DB(DB&&) noexcept = default;
 DB& DB::operator=(DB&&) noexcept = default;
-Result<std::unique_ptr<DB>> DB::OpenInMemory() {
-  auto impl = Impl::OpenInMemory();
-  if (!impl.ok())
-    return impl.status();
-  return std::unique_ptr<DB>(new DB(std::move(impl.value())));
-}
 Result<std::unique_ptr<DB>> DB::Open(const std::filesystem::path& p, Options o) {
   auto impl = Impl::Open(p, std::move(o));
   if (!impl.ok())

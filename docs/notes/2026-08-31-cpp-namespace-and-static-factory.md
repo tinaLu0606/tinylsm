@@ -1,11 +1,14 @@
 # 2026-08-31 · C++ namespace、类作用域与静态工厂函数
 
+> 2026-09-04 更新：`OpenInMemory()` 已从 TinyLSM 删除。下文保留为历史代码的
+> C++ 语法讲解；关于私有默认构造函数的结论仍适用于 `Open()`。
+
 ## 记录来源
 
 - 类型：技术学习
 - 来源：阅读 `src/db/db_impl.cpp` 中的命名空间和
   `DB::Impl::OpenInMemory()` 时产生的问题，AI 整理
-- 状态：`已验证`；结论基于当前 TinyLSM 源码
+- 状态：`历史记录`；语法结论仍有效，示例函数已删除
 - 相关文件：[`../../include/tinylsm/db.h`](../../include/tinylsm/db.h)、
   [`../../src/db/db_impl.h`](../../src/db/db_impl.h)、
   [`../../src/db/db_impl.cpp`](../../src/db/db_impl.cpp)

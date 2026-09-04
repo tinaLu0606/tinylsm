@@ -24,9 +24,6 @@ class DBTestPeer;
 /// exceptions, including std::bad_alloc, may propagate through this interface.
 class DB final {
 public:
-  /// Creates a process-local database with no persistent storage or recovery.
-  static Result<std::unique_ptr<DB>> OpenInMemory();
-
   /// Opens or recovers a persistent database at `db_path`.
   ///
   /// When the path does not contain a database, `options.create_if_missing`

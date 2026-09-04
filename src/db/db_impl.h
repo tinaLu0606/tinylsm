@@ -18,7 +18,6 @@ namespace tinylsm {
 /// rules that do not belong to any individual file format.
 class DB::Impl {
 public:
-  static Result<std::unique_ptr<Impl>> OpenInMemory();
   static Result<std::unique_ptr<Impl>> Open(const std::filesystem::path& path,
                                             Options options);
   static Result<std::unique_ptr<Impl>> Open(const std::filesystem::path& path,

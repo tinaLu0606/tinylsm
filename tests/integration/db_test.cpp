@@ -327,8 +327,9 @@ TEST(DBErrorTest, ExhaustedRecoveredSequenceUsesResourceStatus) {
   EXPECT_EQ(opened.status().code(), tinylsm::StatusCode::kResourceExhausted);
 }
 
-TEST(DBTest, InMemoryDistinguishesMissingEmptyAndTombstone) {
-  auto opened = tinylsm::DB::OpenInMemory();
+TEST(DBTest, DistinguishesMissingEmptyAndTombstone) {
+  TempDir dir;
+  auto opened = tinylsm::DB::Open(dir.path());
   ASSERT_TRUE(opened.ok());
   auto& db = *opened.value();
   EXPECT_TRUE(db.Put("b", "two").ok());
@@ -343,7 +344,8 @@ TEST(DBTest, InMemoryDistinguishesMissingEmptyAndTombstone) {
 }
 
 TEST(DBTest, DeleteOfMissingKeyIsIdempotent) {
-  auto opened = tinylsm::DB::OpenInMemory();
+  TempDir dir;
+  auto opened = tinylsm::DB::Open(dir.path());
   ASSERT_TRUE(opened.ok());
   EXPECT_TRUE(opened.value()->Delete("missing").ok());
   EXPECT_TRUE(opened.value()->Delete("missing").ok());

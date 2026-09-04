@@ -248,8 +248,7 @@ full compaction 覆盖全部磁盘表，因此可以安全删除 tombstone。特
 
 - 零张表：返回 OK；
 - 一张表：允许重写；
-- 结果全是 tombstone：发布零张表，不制造空 SSTable；
-- in-memory DB：返回 `NotSupported`。
+- 结果全是 tombstone：发布零张表，不制造空 SSTable。
 
 Compaction 的文件编号与状态变化合同：
 

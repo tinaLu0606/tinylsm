@@ -35,7 +35,7 @@
 
 ### 3. 当前对外提供了哪些主要操作？
 
-说明 `OpenInMemory`、`Open`、`Put`、`Get`、`Delete`、`Scan` 和 `Close` 各自做
+说明 `Open`、`Put`、`Get`、`Delete`、`Scan` 和 `Close` 各自做
 什么。为什么 `Get` 需要 `Result<std::string>`，不能只返回 `std::string`？
 
 参考：`include/tinylsm/db.h`
