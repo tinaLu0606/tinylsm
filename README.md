@@ -19,6 +19,7 @@ SSTables; compaction and concurrent access are not implemented.
 - A C++20 compiler
 - GoogleTest for test builds
 - Protobuf (if it is not installed, CMake fetches the pinned v29.3 source)
+- Node.js and npm when developing the optional Lab UI
 
 On macOS, the main build dependencies can be installed with Homebrew:
 
@@ -73,6 +74,23 @@ JSON output is JSON Lines. Keys and values are Base64 encoded so arbitrary bytes
 can be represented without escaping or encoding ambiguity. Command-line
 arguments themselves remain subject to shell limitations; binary applications
 should use the C++ API.
+
+## Lab UI scaffold
+
+The experimental React and TypeScript frontend is maintained as the
+`tools/lab_web` Git submodule. Initialize it and start the Vite development
+server with:
+
+```sh
+git submodule update --init tools/lab_web
+cd tools/lab_web
+npm install
+npm run dev
+```
+
+The current frontend is a standalone interface scaffold. It proxies `/api`
+requests to `http://127.0.0.1:8080`; the C++ lab server and diagnostic API are
+not implemented yet.
 
 ## Developer commands
 
@@ -201,6 +219,7 @@ The main modules are:
 - `src/manifest`: persistent metadata codec and publication protocol.
 - `src/io`: filesystem interfaces and POSIX implementation.
 - `tools/cli`: argument parsing and CLI command handlers.
+- `tools/lab_web`: experimental Lab UI maintained as a Git submodule.
 
 ## Core data flows
 

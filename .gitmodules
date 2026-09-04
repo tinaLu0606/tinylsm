@@ -1,0 +1,3 @@
+[submodule "tools/lab_web"]
+	path = tools/lab_web
+	url = ../tinylsm-lab-ui
