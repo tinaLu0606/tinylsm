@@ -382,6 +382,7 @@ Status DB::Impl::FlushMemTable() {
 
   tables_.reserve(tables_.size() + 1);
   const std::uint64_t old_wal_number = current.active_wal_number;
+  const auto old_wal_path = *path_ / internal::WalFileName(old_wal_number);
 
   // This is the flush commit point. Before it succeeds, the old Manifest, WAL,
   // and MemTable remain authoritative even if orphan files were created.
@@ -402,9 +403,9 @@ Status DB::Impl::FlushMemTable() {
   wal_ = std::move(new_wal);
   tables_.push_back(std::move(verified.value()));
   memtable_.Clear();
-  if (old_wal)
-    old_wal->Close().IgnoreError();
-  if (BestEffortRemove(*path_ / internal::WalFileName(old_wal_number)))
+  BestEffortClose(old_wal.get());
+  old_wal.reset();
+  if (BestEffortRemove(old_wal_path))
     BestEffortSyncDir();
   return Status::Ok();
 }
@@ -634,6 +635,16 @@ bool DB::Impl::BestEffortRemove(const std::filesystem::path& path) noexcept {
   return false;
 }
 
+void DB::Impl::BestEffortClose(internal::WalWriter* wal) noexcept {
+  if (!wal)
+    return;
+  try {
+    wal->Close().IgnoreError();
+  } catch (...) {
+    return;
+  }
+}
+
 void DB::Impl::RememberCleanup(const std::filesystem::path& path) noexcept {
   try {
     if (std::find(pending_cleanup_.begin(), pending_cleanup_.end(), path) ==
@@ -723,6 +734,6 @@ Status DB::Impl::Close() {
 }
 DB::Impl::~Impl() {
   if (!closed_ && wal_)
-    wal_->Close().IgnoreError();
+    BestEffortClose(wal_.get());
 }
 } // namespace tinylsm

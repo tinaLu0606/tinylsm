@@ -50,6 +50,7 @@ private:
   /// is the commit point; later in-memory switching and cleanup cannot fail the write.
   Status FlushMemTable();
   bool BestEffortRemove(const std::filesystem::path& path) noexcept;
+  void BestEffortClose(internal::WalWriter* wal) noexcept;
   void RememberCleanup(const std::filesystem::path& path) noexcept;
   void BestEffortSyncDir() noexcept;
   Status CheckOpen() const;

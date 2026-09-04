@@ -366,3 +366,21 @@ TEST(FlushRecoveryTest, OldWalCleanupFailureDoesNotChangeCommittedSuccess) {
   EXPECT_EQ(reopened.value()->Get("key").value(), std::string(64, 'v'));
   EXPECT_EQ(reopened.value()->Get("next").value(), std::string(64, 'n'));
 }
+
+TEST(FlushRecoveryTest, OldWalCloseExceptionDoesNotChangeCommittedSuccess) {
+  TempDir dir;
+  auto plan = std::make_shared<FaultPlan>();
+  auto opened = tinylsm::internal::DBTestPeer::Open(
+      dir.path(), FlushOptions(), tinylsm::test::NewFaultInjectionFileSystem(plan));
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+  plan->Throw(FaultOperation::kClose, "000001.wal");
+
+  EXPECT_TRUE(opened.value()->Put("key", std::string(64, 'v')).ok());
+  EXPECT_EQ(opened.value()->Get("key").value(), std::string(64, 'v'));
+  EXPECT_TRUE(opened.value()->Close().ok());
+  opened.value().reset();
+
+  auto reopened = tinylsm::DB::Open(dir.path(), FlushOptions());
+  ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
+  EXPECT_EQ(reopened.value()->Get("key").value(), std::string(64, 'v'));
+}

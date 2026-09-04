@@ -3,10 +3,12 @@
 #include <filesystem>
 #include <fstream>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
 #include "db/db_test_peer.h"
+#include "db/filename.h"
 #include "manifest/manifest_state.h"
 #include "test_support/fault_injection_fs.h"
 #include "test_support/temp_dir.h"
@@ -161,4 +163,33 @@ TEST(CleanupRecoveryTest, CompactionRetriesPendingTableRemoval) {
   EXPECT_FALSE(std::filesystem::exists(dir.path() / "000002.sst"));
   EXPECT_EQ(opened.value()->Get("key-0").value(), "value-0");
   EXPECT_EQ(opened.value()->Get("key-2").value(), "value-2");
+}
+
+TEST(CleanupRecoveryTest, RepeatedMaintenanceLeavesOnlyManifestLiveFiles) {
+  TempDir dir;
+  auto opened = tinylsm::DB::Open(dir.path(), FlushEveryWriteOptions());
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+  WriteJunk(dir.path() / "notes.txt");
+  for (int i = 0; i < 5; ++i) {
+    ASSERT_TRUE(opened.value()
+                    ->Put("key-" + std::to_string(i), "value-" + std::to_string(i))
+                    .ok());
+  }
+  ASSERT_TRUE(opened.value()->Compact().ok());
+
+  auto fs = tinylsm::internal::NewPosixFileSystem();
+  auto manifest = tinylsm::internal::ManifestState::Load(*fs, dir.path());
+  ASSERT_TRUE(manifest.ok()) << manifest.status().ToString();
+  std::set<std::string> expected{
+      tinylsm::internal::WalFileName(manifest.value().active_wal_number)};
+  for (const auto& table : manifest.value().live_tables)
+    expected.insert(tinylsm::internal::SstableFileName(table.file_number));
+
+  for (const auto& path : std::filesystem::directory_iterator(dir.path())) {
+    const auto name = path.path().filename().string();
+    if (tinylsm::internal::ParseNumberedFileName(name))
+      EXPECT_TRUE(expected.erase(name)) << name;
+  }
+  EXPECT_TRUE(expected.empty());
+  EXPECT_TRUE(std::filesystem::exists(dir.path() / "notes.txt"));
 }
