@@ -410,7 +410,7 @@ Status DB::Impl::FlushMemTable() {
   memtable_.Clear();
   if (old_wal)
     old_wal->Close().IgnoreError();
-  fs_->Remove(*path_ / WalName(old_wal_number)).IgnoreError();
+  BestEffortRemove(*path_ / WalName(old_wal_number));
   return Status::Ok();
 }
 
@@ -496,6 +496,140 @@ Result<std::vector<Entry>> DB::Impl::Scan(std::string_view begin,
     return merged.value()->status();
   return out;
 }
+
+Status DB::Impl::Compact() {
+  auto open = CheckOpen();
+  if (!open.ok())
+    return open;
+
+  const auto& current = manifest_->current();
+  if (current.live_tables.size() != tables_.size())
+    return Status::Corruption("Manifest and Reader table sets differ");
+  if (tables_.empty())
+    return Status::Ok();
+
+  std::vector<std::filesystem::path> old_table_paths;
+  old_table_paths.reserve(current.live_tables.size());
+  for (const auto& table : current.live_tables)
+    old_table_paths.push_back(*path_ / SstName(table.file_number));
+
+  std::vector<std::unique_ptr<internal::InternalIterator>> inputs;
+  inputs.reserve(tables_.size());
+  for (const auto& table : tables_) {
+    auto iterator = table->NewIterator({}, {});
+    if (!iterator.ok())
+      return iterator.status().WithContext("create compaction input iterator");
+    inputs.push_back(std::move(iterator.value()));
+  }
+  auto merged = internal::NewMergingIterator(std::move(inputs));
+  if (!merged.ok())
+    return merged.status().WithContext("create compaction merge iterator");
+
+  const std::uint64_t replacement_number = current.next_file_number;
+  const auto temp = *path_ / (SstName(replacement_number) + ".tmp");
+  const auto final = *path_ / SstName(replacement_number);
+  std::unique_ptr<internal::SSTableBuilder> builder;
+
+  while (merged.value()->Valid()) {
+    const auto& entry = merged.value()->entry();
+    if (entry.type == internal::ValueType::kValue) {
+      if (!builder) {
+        if (replacement_number == std::numeric_limits<std::uint64_t>::max())
+          return Status::ResourceExhausted("file number space is exhausted");
+        auto file = fs_->OpenWritable(temp, false);
+        if (!file.ok())
+          return file.status().WithContext("create temporary compacted SSTable");
+        builder = std::make_unique<internal::SSTableBuilder>(
+            std::move(file.value()), options_.sstable_block_bytes);
+      }
+      auto status = builder->Add(entry);
+      if (!status.ok())
+        return status.WithContext("build temporary compacted SSTable");
+    }
+
+    auto next = merged.value()->Next();
+    if (!next.ok())
+      return next.WithContext("read compaction input");
+  }
+  if (!merged.value()->status().ok())
+    return merged.value()->status().WithContext("read compaction input");
+  merged.value().reset();
+
+  internal::ManifestSnapshot next = current;
+  next.live_tables.clear();
+  std::vector<std::unique_ptr<internal::SSTableReader>> replacement_tables;
+
+  if (builder) {
+    auto built = builder->Finish();
+    if (!built.ok())
+      return built.status().WithContext("finish temporary compacted SSTable");
+    builder.reset();
+
+    auto verify_file = fs_->OpenRandomAccess(temp);
+    if (!verify_file.ok())
+      return verify_file.status().WithContext(
+          "open temporary compacted SSTable for validation");
+    auto verified = internal::SSTableReader::Open(std::move(verify_file.value()));
+    if (!verified.ok())
+      return verified.status().WithContext("validate temporary compacted SSTable");
+    auto properties = verified.value()->ValidateAndGetProperties();
+    if (!properties.ok()) {
+      return properties.status().WithContext(
+          "validate temporary compacted SSTable data");
+    }
+
+    internal::TableMeta replacement{
+        replacement_number,         built.value().file_size,
+        built.value().smallest_key, built.value().largest_key,
+        built.value().min_sequence, built.value().max_sequence};
+    if (!Matches(replacement, properties.value()))
+      return Status::Corruption("compacted SSTable metadata does not match file");
+
+    auto status = fs_->Rename(temp, final);
+    if (!status.ok())
+      return status.WithContext("publish compacted SSTable filename");
+    status = fs_->SyncDir(*path_);
+    if (!status.ok())
+      return status.WithContext("sync database directory after compaction rename");
+
+    next.next_file_number = replacement_number + 1;
+    next.live_tables.push_back(std::move(replacement));
+    replacement_tables.reserve(1);
+    replacement_tables.push_back(std::move(verified.value()));
+  }
+
+  // This is the compaction commit point. All input iteration, replacement
+  // validation, and in-memory allocations are complete before publication.
+  auto published = manifest_->Publish(std::move(next));
+  if (!published.durable()) {
+    if (published.state() == internal::ManifestPublishState::kVisibleNotDurable) {
+      terminal_error_ = published.status().WithContext(
+          "publish compaction MANIFEST: replacement may be visible; close and "
+          "reopen the database");
+      return *terminal_error_;
+    }
+    return published.status().WithContext("publish compaction MANIFEST");
+  }
+
+  // Publication made the replacement authoritative. The swap is noexcept;
+  // closing old readers and removing their files are best-effort cleanup.
+  tables_.swap(replacement_tables);
+  replacement_tables.clear();
+  for (const auto& old_table : old_table_paths)
+    BestEffortRemove(old_table);
+  return Status::Ok();
+}
+
+void DB::Impl::BestEffortRemove(const std::filesystem::path& path) noexcept {
+  try {
+    fs_->Remove(path).IgnoreError();
+  } catch (...) {
+    // Cleanup is never allowed to turn a durably committed operation into an
+    // apparent failure. A later Open/cleanup pass can retry the orphan.
+    return;
+  }
+}
+
 Status DB::Impl::Close() {
   if (closed_)
     return Status::AlreadyClosed("database is closed");

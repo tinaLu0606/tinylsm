@@ -71,6 +71,13 @@ public:
   /// returned. A non-empty end less than begin returns kInvalidArgument.
   Result<std::vector<Entry>> Scan(std::string_view begin, std::string_view end) const;
 
+  /// Rewrites all currently published SSTables into zero or one replacement.
+  ///
+  /// Compaction is synchronous and does not flush or modify the MemTable or
+  /// active WAL. Because it covers every published table, obsolete versions
+  /// and tombstones are removed from the replacement.
+  Status Compact();
+
   /// Closes writable resources, syncing the WAL first when sync_on_write is enabled.
   ///
   /// A sync failure leaves the DB open so the caller may retry. Once the

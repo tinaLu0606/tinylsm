@@ -19,5 +19,6 @@ Status DB::Delete(std::string_view k) { return impl_->Delete(k); }
 Result<std::vector<Entry>> DB::Scan(std::string_view b, std::string_view e) const {
   return impl_->Scan(b, e);
 }
+Status DB::Compact() { return impl_->Compact(); }
 Status DB::Close() { return impl_->Close(); }
 } // namespace tinylsm

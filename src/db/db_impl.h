@@ -27,6 +27,7 @@ public:
   Status Delete(std::string_view key);
   Result<std::string> Get(std::string_view key) const;
   Result<std::vector<Entry>> Scan(std::string_view begin, std::string_view end) const;
+  Status Compact();
   Status Close();
   ~Impl();
 
@@ -47,6 +48,7 @@ private:
   /// Appends one SSTable and publishes a replacement WAL. Manifest publication
   /// is the commit point; later in-memory switching and cleanup cannot fail the write.
   Status FlushMemTable();
+  void BestEffortRemove(const std::filesystem::path& path) noexcept;
   Status CheckOpen() const;
 
   Options options_;

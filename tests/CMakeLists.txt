@@ -5,6 +5,7 @@ add_executable(tinylsm_tests
   unit/core_test.cpp
   unit/iterator_test.cpp
   integration/db_test.cpp
+  recovery/compaction_recovery_test.cpp
   recovery/flush_recovery_test.cpp
   test_support/fault_injection_fs.cpp
   test_support/temp_dir.cpp

@@ -8,8 +8,8 @@ publication.
 The project is intentionally small enough to inspect end to end. It is a
 learning-oriented prototype rather than a production database. The current
 write path supports repeated synchronous flushes into an ordered set of
-SSTables, and range scans lazily merge those tables; compaction and concurrent
-access are not implemented.
+SSTables, range scans lazily merge those tables, and callers can explicitly run
+synchronous full compaction. Concurrent access is not implemented.
 
 ## Quick start
 
@@ -119,8 +119,8 @@ reports that packaging is not implemented.
 ## Public C++ API
 
 The public interface is deliberately small: `Open`, `Put`, `Get`, `Delete`,
-`Scan`, and `Close`. Expected storage failures are returned through `Status` and
-`Result<T>` instead of exceptions.
+`Scan`, `Compact`, and `Close`. Expected storage failures are returned through
+`Status` and `Result<T>` instead of exceptions.
 
 ```cpp
 #include <iostream>
@@ -164,6 +164,7 @@ and are not thread-safe; callers must synchronize shared access externally.
   validation of Manifest-referenced table data during startup.
 - Tombstones that hide deleted values across memory and disk.
 - Half-open ordered range scans that merge MemTable and SSTable state.
+- Explicit synchronous full compaction into zero or one replacement SSTable.
 - A versioned Manifest snapshot that records the authoritative WAL, ordered
   SSTable set, and sequence state while retaining version-1 read compatibility.
 - Startup recovery through Manifest loading and active-WAL replay.
@@ -266,6 +267,25 @@ MemTable
     -> best-effort remove the old WAL
 ```
 
+### Compaction commit protocol
+
+`Compact()` merges every published SSTable through the same internal iterator
+path as `Scan`. It keeps the newest sequence for each key, drops tombstones, and
+does not flush the MemTable or replace the active WAL.
+
+```text
+published SSTables
+    -> merge all entries and build a replacement when a live value exists
+    -> verify, rename, and directory-sync the replacement SSTable
+    -> publish a Manifest containing zero or one table  <- commit point
+    -> swap the in-memory reader set without allocation
+    -> best-effort remove the old SSTables
+```
+
+A failure before Manifest publication leaves the old table set authoritative.
+If the Manifest rename is visible but its directory sync fails, the current DB
+handle rejects further data operations until it is closed and reopened.
+
 Before the Manifest rename, the old Manifest, WAL, and MemTable remain
 authoritative even if the attempted flush created orphan files. A successful
 Manifest rename makes the replacement visible; syncing the database directory
@@ -300,10 +320,9 @@ verify the Manifest metadata; Open therefore costs `O(total live SSTable bytes)`
 
 TinyLSM currently favors clarity and testability over feature breadth:
 
-- SSTables accumulate across repeated flushes until explicit compaction is
-  implemented, so startup, reads, and materialized scans become more expensive
-  as the live table set grows.
-- There is no compaction, multi-level layout, Bloom filter, or block cache.
+- Compaction is explicit, synchronous, and full-table only; there is no
+  automatic trigger, background worker, or multi-level layout.
+- There is no Bloom filter or block cache.
 - Flushes are synchronous; there is no immutable-MemTable/background worker.
 - There is no transaction, write batch, snapshot, or concurrent writer support.
 - The POSIX filesystem path is the implemented persistent backend.
