@@ -24,8 +24,10 @@ Result<std::size_t> ReadUpTo(SequentialFile& file, std::span<std::byte> dst) {
 } // namespace
 
 Result<WalReplayResult>
-WalReader::Replay(const std::function<Status(const InternalEntry&)>& apply) {
+WalReader::Replay(std::uint64_t sequence_floor,
+                  const std::function<Status(const InternalEntry&)>& apply) {
   WalReplayResult result;
+  std::uint64_t previous_sequence = sequence_floor;
   while (true) {
     std::array<std::byte, kWalHeaderSize> header{};
     auto header_read = ReadUpTo(*file_, header);
@@ -66,11 +68,14 @@ WalReader::Replay(const std::function<Status(const InternalEntry&)>& apply) {
     auto decoded = DecodeWalRecord(record, limits_);
     if (!decoded.ok())
       return decoded.status();
+    if (decoded.value().sequence <= previous_sequence)
+      return Status::Corruption("WAL sequence did not strictly increase");
     Status status = apply(decoded.value());
     if (!status.ok())
       return status;
 
-    result.max_sequence = std::max(result.max_sequence, decoded.value().sequence);
+    previous_sequence = decoded.value().sequence;
+    result.max_sequence = previous_sequence;
     result.valid_bytes += record.size();
   }
 }

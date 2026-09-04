@@ -7,8 +7,8 @@ publication.
 
 The project is intentionally small enough to inspect end to end. It is a
 learning-oriented prototype rather than a production database. The current
-reader can recover an ordered set of SSTables, while the write path still stops
-before a second flush; compaction and concurrent access are not implemented.
+write path supports repeated synchronous flushes into an ordered set of
+SSTables; compaction and concurrent access are not implemented.
 
 ## Quick start
 
@@ -138,7 +138,8 @@ and are not thread-safe; callers must synchronize shared access externally.
 
 ## Implemented scope
 
-- WAL-first `Put` and `Delete`, with optional per-write synchronization.
+- WAL-first `Put` and `Delete`, with optional per-write synchronization and
+  repeated synchronous MemTable flushes.
 - An ordered MemTable that keeps the newest sequence for each user key.
 - Immutable, block-indexed SSTables with CRC32C integrity checks and complete
   validation of Manifest-referenced table data during startup.
@@ -238,9 +239,9 @@ MemTable
     -> build and verify temporary SSTable
     -> rename SSTable and sync the database directory
     -> create and sync a replacement WAL
-    -> replace and sync the new Manifest        <- durable commit point
+    -> append the table to a new Manifest       <- durable commit point
     -> switch the live in-memory table/WAL state
-    -> remove obsolete files when safe
+    -> best-effort remove the old WAL
 ```
 
 Before the Manifest rename, the old Manifest, WAL, and MemTable remain
@@ -258,6 +259,7 @@ Open database
     -> validate and open every referenced SSTable
     -> read all live data blocks and verify true key/sequence metadata
     -> replay its active WAL into a fresh MemTable
+    -> require WAL sequences to increase beyond the published sequence
     -> truncate an incomplete WAL tail when recoverable
     -> continue from the highest recovered sequence number
 ```
@@ -276,9 +278,9 @@ verify the Manifest metadata; Open therefore costs `O(total live SSTable bytes)`
 
 TinyLSM currently favors clarity and testability over feature breadth:
 
-- Recovery and reads support multiple Manifest-referenced SSTables, but the
-  writer can publish only the first SSTable; a later write that would require a
-  second flush returns `NotSupported` before sequence, WAL, or MemTable mutation.
+- SSTables accumulate across repeated flushes until explicit compaction is
+  implemented, so startup, reads, and materialized scans become more expensive
+  as the live table set grows.
 - There is no compaction, multi-level layout, Bloom filter, or block cache.
 - Flushes are synchronous; there is no immutable-MemTable/background worker.
 - There is no transaction, write batch, snapshot, or concurrent writer support.

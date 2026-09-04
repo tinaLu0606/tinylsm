@@ -22,13 +22,16 @@ public:
   WalReader(std::unique_ptr<SequentialFile> file, DecodeLimits limits)
       : file_(std::move(file)), limits_(limits) {}
 
-  /// Replays complete records in file order through `apply`.
+  /// Replays complete records in file order through `apply`. Every record's
+  /// sequence must be greater than `sequence_floor` and the preceding record;
+  /// gaps are allowed.
   ///
   /// An incomplete final header or payload is reported through truncated_tail
   /// and valid_bytes so the DB can truncate it. Invalid complete records and
   /// I/O errors fail replay without modifying the file.
   Result<WalReplayResult>
-  Replay(const std::function<Status(const InternalEntry&)>& apply);
+  Replay(std::uint64_t sequence_floor,
+         const std::function<Status(const InternalEntry&)>& apply);
 
 private:
   std::unique_ptr<SequentialFile> file_;

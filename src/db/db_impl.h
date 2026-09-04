@@ -40,12 +40,12 @@ private:
   Status OpenManifestSSTables(const internal::ManifestSnapshot& snapshot);
   Status RecoverActiveWal(const internal::ManifestSnapshot& snapshot);
 
-  /// Performs the WAL-first write path and may synchronously trigger the first
-  /// flush. A flush error can occur after the record was accepted earlier.
+  /// Performs the WAL-first write path and may synchronously trigger a flush.
+  /// A flush error can occur after the record was accepted earlier.
   Status Write(std::string_view key, std::string_view value, internal::ValueType type);
 
-  /// Publishes one SSTable and replacement WAL. Manifest publication is the
-  /// commit point; later in-memory switching and old-WAL cleanup cannot fail the write.
+  /// Appends one SSTable and publishes a replacement WAL. Manifest publication
+  /// is the commit point; later in-memory switching and cleanup cannot fail the write.
   Status FlushMemTable();
   Status CheckOpen() const;
 

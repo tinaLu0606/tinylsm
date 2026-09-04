@@ -236,8 +236,10 @@ Status DB::Impl::RecoverActiveWal(const internal::ManifestSnapshot& snapshot) {
     return seq.status().WithContext("open active WAL for replay");
 
   internal::WalReader reader(std::move(seq.value()), Limits(options_));
-  auto replay = reader.Replay(
-      [&](const internal::InternalEntry& e) { return memtable_.Apply(e); });
+  auto replay =
+      reader.Replay(snapshot.last_sequence, [&](const internal::InternalEntry& e) {
+        return memtable_.Apply(e);
+      });
   if (!replay.ok())
     return replay.status().WithContext("replay active WAL");
 
@@ -289,9 +291,6 @@ Status DB::Impl::Write(std::string_view key, std::string_view value,
     return Status::ResourceExhausted("memtable size accounting overflow");
   projected += added;
 
-  if (manifest_ && !manifest_->current().live_tables.empty() &&
-      projected >= options_.memtable_bytes)
-    return Status::NotSupported("the current writer supports only one flushed SSTable");
   if (next_sequence_ == std::numeric_limits<std::uint64_t>::max())
     return Status::ResourceExhausted("sequence space is exhausted");
 
@@ -322,9 +321,9 @@ Status DB::Impl::Write(std::string_view key, std::string_view value,
 }
 
 Status DB::Impl::FlushMemTable() {
-  const auto current = manifest_->current();
-  if (!current.live_tables.empty())
-    return Status::NotSupported("the current writer supports only one flushed SSTable");
+  const auto& current = manifest_->current();
+  if (current.live_tables.size() != tables_.size())
+    return Status::Corruption("Manifest and Reader table sets differ");
 
   const std::uint64_t table_number = current.next_file_number;
   if (table_number >= std::numeric_limits<std::uint64_t>::max() - 1)
@@ -375,7 +374,8 @@ Status DB::Impl::FlushMemTable() {
   auto new_wal = std::make_unique<internal::WalWriter>(std::move(new_wal_file.value()),
                                                        Limits(options_));
 
-  internal::ManifestSnapshot next;
+  internal::ManifestSnapshot next = current;
+  next.live_tables.reserve(current.live_tables.size() + 1);
   next.active_wal_number = wal_number;
   next.next_file_number = wal_number + 1;
   next.last_sequence = next_sequence_ - 1;
@@ -383,16 +383,15 @@ Status DB::Impl::FlushMemTable() {
       internal::TableMeta{table_number, built.value().file_size,
                           built.value().smallest_key, built.value().largest_key,
                           built.value().min_sequence, built.value().max_sequence});
-  if (!Matches(next.live_tables.front(), properties.value()))
+  if (!Matches(next.live_tables.back(), properties.value()))
     return Status::Corruption("built SSTable metadata does not match file");
 
-  std::vector<std::unique_ptr<internal::SSTableReader>> next_tables;
-  next_tables.reserve(1);
-  next_tables.push_back(std::move(verified.value()));
+  tables_.reserve(tables_.size() + 1);
+  const std::uint64_t old_wal_number = current.active_wal_number;
 
   // This is the flush commit point. Before it succeeds, the old Manifest, WAL,
   // and MemTable remain authoritative even if orphan files were created.
-  auto published = manifest_->Publish(next);
+  auto published = manifest_->Publish(std::move(next));
   if (!published.durable()) {
     if (published.state() == internal::ManifestPublishState::kVisibleNotDurable) {
       terminal_error_ = published.status().WithContext(
@@ -407,11 +406,11 @@ Status DB::Impl::FlushMemTable() {
   // the newly published state must remain successful once committed.
   auto old_wal = std::move(wal_);
   wal_ = std::move(new_wal);
-  tables_.swap(next_tables);
+  tables_.push_back(std::move(verified.value()));
   memtable_.Clear();
   if (old_wal)
     old_wal->Close().IgnoreError();
-  fs_->Remove(*path_ / WalName(current.active_wal_number)).IgnoreError();
+  fs_->Remove(*path_ / WalName(old_wal_number)).IgnoreError();
   return Status::Ok();
 }
 

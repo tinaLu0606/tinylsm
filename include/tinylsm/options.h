@@ -8,7 +8,7 @@ namespace tinylsm {
 /// Configuration used when opening a persistent database.
 struct Options {
   /// Approximate MemTable size in bytes that triggers a synchronous flush.
-  /// Must be non-zero. The current write path supports only the first flush.
+  /// Must be non-zero.
   std::size_t memtable_bytes = 4U * 1024U * 1024U;
 
   /// Creates the database and initial files when they do not already exist.

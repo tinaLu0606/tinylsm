@@ -162,12 +162,61 @@ TEST(FlushRecoveryTest, PreManifestRenameFailuresKeepOldStateRecoverable) {
   }
 }
 
+TEST(FlushRecoveryTest, SecondFlushFailuresKeepPublishedTableAndWalRecoverable) {
+  const std::vector<PublishFaultCase> cases{
+      {FaultOperation::kOpenWritable, ".sst.tmp"},
+      {FaultOperation::kAppend, ".sst.tmp"},
+      {FaultOperation::kSync, ".sst.tmp"},
+      {FaultOperation::kClose, ".sst.tmp", FaultTiming::kAfter},
+      {FaultOperation::kOpenRandomAccess, ".sst.tmp"},
+      {FaultOperation::kReadAt, ".sst.tmp"},
+      {FaultOperation::kRename, ".sst"},
+      {FaultOperation::kSyncDir, ""},
+      {FaultOperation::kOpenWritable, "000005.wal"},
+      {FaultOperation::kSync, "000005.wal"},
+      {FaultOperation::kOpenWritable, "MANIFEST.tmp"},
+      {FaultOperation::kAppend, "MANIFEST.tmp"},
+      {FaultOperation::kSync, "MANIFEST.tmp"},
+      {FaultOperation::kClose, "MANIFEST.tmp", FaultTiming::kAfter},
+      {FaultOperation::kRename, "MANIFEST"},
+  };
+
+  for (const auto& fault : cases) {
+    SCOPED_TRACE(fault.suffix);
+    TempDir dir;
+    auto plan = std::make_shared<FaultPlan>();
+    auto opened = tinylsm::internal::DBTestPeer::Open(
+        dir.path(), FlushOptions(), tinylsm::test::NewFaultInjectionFileSystem(plan));
+    ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+    ASSERT_TRUE(opened.value()->Put("old", std::string(64, 'o')).ok());
+    plan->Fail(fault.operation, fault.suffix, 1, fault.timing);
+
+    auto status = opened.value()->Put("new", std::string(64, 'n'));
+    EXPECT_EQ(status.code(), tinylsm::StatusCode::kIOError);
+    EXPECT_EQ(opened.value()->Get("old").value(), std::string(64, 'o'));
+    EXPECT_EQ(opened.value()->Get("new").value(), std::string(64, 'n'));
+
+    auto real_fs = tinylsm::internal::NewPosixFileSystem();
+    auto manifest = tinylsm::internal::ManifestState::Load(*real_fs, dir.path());
+    ASSERT_TRUE(manifest.ok()) << manifest.status().ToString();
+    EXPECT_EQ(manifest.value().live_tables.size(), 1U);
+
+    EXPECT_TRUE(opened.value()->Close().ok());
+    opened.value().reset();
+    auto reopened = tinylsm::DB::Open(dir.path(), FlushOptions());
+    ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
+    EXPECT_EQ(reopened.value()->Get("old").value(), std::string(64, 'o'));
+    EXPECT_EQ(reopened.value()->Get("new").value(), std::string(64, 'n'));
+  }
+}
+
 TEST(FlushRecoveryTest, ManifestSyncDirFailureFreezesDataOperationsUntilReopen) {
   TempDir dir;
   auto plan = std::make_shared<FaultPlan>();
   auto opened = tinylsm::internal::DBTestPeer::Open(
       dir.path(), FlushOptions(), tinylsm::test::NewFaultInjectionFileSystem(plan));
   ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+  ASSERT_TRUE(opened.value()->Put("old", std::string(64, 'o')).ok());
   plan->Fail(FaultOperation::kSyncDir, "", 2);
 
   const auto status = opened.value()->Put("key", std::string(64, 'v'));
@@ -185,6 +234,7 @@ TEST(FlushRecoveryTest, ManifestSyncDirFailureFreezesDataOperationsUntilReopen) 
 
   auto reopened = tinylsm::DB::Open(dir.path(), FlushOptions());
   ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
+  EXPECT_EQ(reopened.value()->Get("old").value(), std::string(64, 'o'));
   EXPECT_EQ(reopened.value()->Get("key").value(), std::string(64, 'v'));
   EXPECT_EQ(reopened.value()->Get("later").status().code(),
             tinylsm::StatusCode::kNotFound);
@@ -306,10 +356,13 @@ TEST(FlushRecoveryTest, OldWalCleanupFailureDoesNotChangeCommittedSuccess) {
   EXPECT_TRUE(opened.value()->Put("key", std::string(64, 'v')).ok());
   EXPECT_TRUE(std::filesystem::exists(dir.path() / "000001.wal"));
   EXPECT_EQ(opened.value()->Get("key").value(), std::string(64, 'v'));
+  EXPECT_TRUE(opened.value()->Put("next", std::string(64, 'n')).ok());
+  EXPECT_EQ(opened.value()->Get("next").value(), std::string(64, 'n'));
   EXPECT_TRUE(opened.value()->Close().ok());
   opened.value().reset();
 
   auto reopened = tinylsm::DB::Open(dir.path(), FlushOptions());
   ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
   EXPECT_EQ(reopened.value()->Get("key").value(), std::string(64, 'v'));
+  EXPECT_EQ(reopened.value()->Get("next").value(), std::string(64, 'n'));
 }

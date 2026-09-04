@@ -159,7 +159,7 @@ TEST(WalReaderTest, ReplaysValidPrefixAndClassifiesTruncatedTail) {
   std::string log = first.value() + second.value().substr(0, 5);
   ti::WalReader reader(std::make_unique<StringSequentialFile>(log, 3), {});
   std::vector<ti::InternalEntry> applied;
-  auto replay = reader.Replay([&](const ti::InternalEntry& entry) {
+  auto replay = reader.Replay(0, [&](const ti::InternalEntry& entry) {
     applied.push_back(entry);
     return tinylsm::Status::Ok();
   });
@@ -174,8 +174,56 @@ TEST(WalReaderTest, ReplaysValidPrefixAndClassifiesTruncatedTail) {
   ti::WalReader corrupt_reader(
       std::make_unique<StringSequentialFile>(corrupt, corrupt.size()), {});
   auto corrupt_result = corrupt_reader.Replay(
-      [](const ti::InternalEntry&) { return tinylsm::Status::Ok(); });
+      0, [](const ti::InternalEntry&) { return tinylsm::Status::Ok(); });
   EXPECT_EQ(corrupt_result.status().code(), tinylsm::StatusCode::kCorruption);
+}
+
+TEST(WalReaderTest, EnforcesPublishedFloorAndStrictlyIncreasingSequence) {
+  const auto make_log = [](std::initializer_list<std::uint64_t> sequences) {
+    std::string log;
+    for (const auto sequence : sequences) {
+      auto encoded = ti::EncodeWalRecord(
+          {"key-" + std::to_string(sequence), sequence, ti::ValueType::kValue, "value"},
+          {});
+      if (encoded.ok())
+        log += encoded.value();
+    }
+    return log;
+  };
+
+  std::vector<ti::InternalEntry> applied;
+  auto valid_log = make_log({8, 10, 13});
+  ti::WalReader valid_reader(
+      std::make_unique<StringSequentialFile>(valid_log, valid_log.size()), {});
+  auto valid = valid_reader.Replay(7, [&](const ti::InternalEntry& entry) {
+    applied.push_back(entry);
+    return tinylsm::Status::Ok();
+  });
+  ASSERT_TRUE(valid.ok()) << valid.status().ToString();
+  EXPECT_EQ(valid.value().max_sequence, 13U);
+  EXPECT_EQ(applied.size(), 3U);
+
+  for (const auto& [floor, sequences] :
+       std::vector<std::pair<std::uint64_t, std::vector<std::uint64_t>>>{
+           {7, {7}}, {7, {6}}, {0, {0}}, {7, {8, 8}}, {7, {9, 8}}}) {
+    SCOPED_TRACE(floor);
+    std::string log;
+    for (const auto sequence : sequences) {
+      auto encoded = ti::EncodeWalRecord(
+          {"key-" + std::to_string(sequence), sequence, ti::ValueType::kValue, "value"},
+          {});
+      ASSERT_TRUE(encoded.ok());
+      log += encoded.value();
+    }
+    std::size_t callback_count = 0;
+    ti::WalReader reader(std::make_unique<StringSequentialFile>(log, log.size()), {});
+    auto replay = reader.Replay(floor, [&](const ti::InternalEntry&) {
+      ++callback_count;
+      return tinylsm::Status::Ok();
+    });
+    EXPECT_EQ(replay.status().code(), tinylsm::StatusCode::kCorruption);
+    EXPECT_LT(callback_count, sequences.size());
+  }
 }
 
 TEST(SstableFormatTest, ChecksOrderingAndIndependentChecksums) {

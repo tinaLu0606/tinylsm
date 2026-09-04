@@ -22,6 +22,7 @@
 #include "test_support/temp_dir.h"
 #include "tinylsm/db.h"
 #include "util/coding.h"
+#include "wal/wal_writer.h"
 
 namespace {
 using tinylsm::test::FaultOperation;
@@ -82,6 +83,24 @@ tinylsm::Status CreateEmptyWal(tinylsm::internal::FileSystem& fs,
   if (!status.ok())
     return status;
   return writable.value()->Close();
+}
+
+tinylsm::Status WriteWal(tinylsm::internal::FileSystem& fs,
+                         const std::filesystem::path& directory, std::uint64_t number,
+                         const std::vector<tinylsm::internal::InternalEntry>& entries) {
+  auto writable = fs.OpenWritable(directory / NumberedName(number, ".wal"), false);
+  if (!writable.ok())
+    return writable.status();
+  tinylsm::internal::WalWriter writer(std::move(writable.value()), {});
+  for (const auto& entry : entries) {
+    auto status = writer.Append(entry);
+    if (!status.ok())
+      return status;
+  }
+  auto status = writer.Sync();
+  if (!status.ok())
+    return status;
+  return writer.Close();
 }
 } // namespace
 
@@ -327,6 +346,63 @@ TEST(DBErrorTest, ExhaustedRecoveredSequenceUsesResourceStatus) {
   EXPECT_EQ(opened.status().code(), tinylsm::StatusCode::kResourceExhausted);
 }
 
+TEST(DBErrorTest, RejectsActiveWalSequenceThatDoesNotFollowManifest) {
+  const std::vector<std::vector<std::uint64_t>> invalid_sequences{
+      {7}, {6}, {8, 8}, {9, 8}};
+  for (const auto& sequences : invalid_sequences) {
+    SCOPED_TRACE(sequences.front());
+    TempDir dir;
+    auto fs = tinylsm::internal::NewPosixFileSystem();
+    ASSERT_TRUE(fs->CreateDir(dir.path()).ok());
+
+    std::vector<tinylsm::internal::InternalEntry> entries;
+    entries.reserve(sequences.size());
+    for (const auto sequence : sequences) {
+      entries.push_back({"key-" + std::to_string(sequence), sequence,
+                         tinylsm::internal::ValueType::kValue, "value"});
+    }
+    ASSERT_TRUE(WriteWal(*fs, dir.path(), 1, entries).ok());
+
+    const tinylsm::internal::ManifestSnapshot snapshot{1, 2, 7, {}};
+    tinylsm::internal::ManifestState manifest(*fs, dir.path(), snapshot);
+    ASSERT_TRUE(manifest.Publish(snapshot).durable());
+    const auto original_size = std::filesystem::file_size(dir.path() / "000001.wal");
+
+    auto opened = tinylsm::DB::Open(dir.path());
+    EXPECT_EQ(opened.status().code(), tinylsm::StatusCode::kCorruption);
+    EXPECT_EQ(std::filesystem::file_size(dir.path() / "000001.wal"), original_size);
+  }
+}
+
+TEST(DBTest, AcceptsActiveWalSequenceGapsAndContinuesAfterTheMaximum) {
+  TempDir dir;
+  auto fs = tinylsm::internal::NewPosixFileSystem();
+  ASSERT_TRUE(fs->CreateDir(dir.path()).ok());
+  ASSERT_TRUE(WriteWal(*fs, dir.path(), 1,
+                       {{"a", 9, tinylsm::internal::ValueType::kValue, "nine"},
+                        {"b", 12, tinylsm::internal::ValueType::kValue, "twelve"}})
+                  .ok());
+
+  const tinylsm::internal::ManifestSnapshot snapshot{1, 2, 7, {}};
+  tinylsm::internal::ManifestState manifest(*fs, dir.path(), snapshot);
+  ASSERT_TRUE(manifest.Publish(snapshot).durable());
+
+  tinylsm::Options options;
+  options.memtable_bytes = 1;
+  auto opened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+  EXPECT_EQ(opened.value()->Get("a").value(), "nine");
+  EXPECT_EQ(opened.value()->Get("b").value(), "twelve");
+  ASSERT_TRUE(opened.value()->Put("c", "thirteen").ok());
+
+  auto published = tinylsm::internal::ManifestState::Load(*fs, dir.path());
+  ASSERT_TRUE(published.ok()) << published.status().ToString();
+  ASSERT_EQ(published.value().live_tables.size(), 1U);
+  EXPECT_EQ(published.value().last_sequence, 13U);
+  EXPECT_EQ(published.value().live_tables.front().min_sequence, 9U);
+  EXPECT_EQ(published.value().live_tables.front().max_sequence, 13U);
+}
+
 TEST(DBTest, DistinguishesMissingEmptyAndTombstone) {
   TempDir dir;
   auto opened = tinylsm::DB::Open(dir.path());
@@ -437,31 +513,65 @@ TEST(DBTest, ReopenTruncatesIncompleteWalTail) {
   EXPECT_EQ(std::filesystem::file_size(wal), valid_size);
 }
 
-TEST(DBTest, FlushMergesSstableAndMemtableAndRejectsSecondFlushEarly) {
+TEST(DBTest, RepeatedFlushPreservesNewestValuesAcrossReopen) {
   TempDir dir;
   tinylsm::Options options;
-  options.memtable_bytes = 128;
+  options.memtable_bytes = 1;
   options.sstable_block_bytes = 40;
   auto opened = tinylsm::DB::Open(dir.path(), options);
   ASSERT_TRUE(opened.ok()) << opened.status().message();
-  ASSERT_TRUE(opened.value()->Put("a", std::string(64, 'a')).ok());
-  ASSERT_TRUE(std::filesystem::exists(dir.path() / "000002.sst"));
-  ASSERT_TRUE(opened.value()->Put("z", "new").ok());
-  ASSERT_TRUE(opened.value()->Put("z", std::string(40, 'n')).ok());
-  auto scan = opened.value()->Scan("", "");
-  ASSERT_TRUE(scan.ok());
-  EXPECT_EQ(scan.value().size(), 2U);
-  const auto wal_size = std::filesystem::file_size(dir.path() / "000003.wal");
-  const auto rejected = opened.value()->Put("x", std::string(128, 'x'));
-  EXPECT_EQ(rejected.code(), tinylsm::StatusCode::kNotSupported);
-  EXPECT_EQ(std::filesystem::file_size(dir.path() / "000003.wal"), wal_size);
-  EXPECT_EQ(opened.value()->Get("x").status().code(), tinylsm::StatusCode::kNotFound);
+
+  auto expect_manifest = [&](std::size_t table_count, std::uint64_t last_sequence) {
+    auto fs = tinylsm::internal::NewPosixFileSystem();
+    auto manifest = tinylsm::internal::ManifestState::Load(*fs, dir.path());
+    ASSERT_TRUE(manifest.ok()) << manifest.status().ToString();
+    EXPECT_EQ(manifest.value().live_tables.size(), table_count);
+    EXPECT_EQ(manifest.value().active_wal_number, table_count * 2 + 1);
+    EXPECT_EQ(manifest.value().next_file_number, table_count * 2 + 2);
+    EXPECT_EQ(manifest.value().last_sequence, last_sequence);
+    for (std::size_t i = 0; i < manifest.value().live_tables.size(); ++i) {
+      EXPECT_EQ(manifest.value().live_tables[i].min_sequence, i + 1);
+      EXPECT_EQ(manifest.value().live_tables[i].max_sequence, i + 1);
+      if (i != 0) {
+        EXPECT_LT(manifest.value().live_tables[i - 1].max_sequence,
+                  manifest.value().live_tables[i].min_sequence);
+      }
+    }
+  };
+
+  ASSERT_TRUE(opened.value()->Put("a", "old-a").ok());
+  expect_manifest(1, 1);
+  EXPECT_EQ(opened.value()->Get("a").value(), "old-a");
+
+  ASSERT_TRUE(opened.value()->Put("b", "live-b").ok());
+  expect_manifest(2, 2);
+  auto first_scan = opened.value()->Scan("", "");
+  ASSERT_TRUE(first_scan.ok());
+  EXPECT_EQ(first_scan.value(),
+            (std::vector<tinylsm::Entry>{{"a", "old-a"}, {"b", "live-b"}}));
+  EXPECT_TRUE(opened.value()->Close().ok());
+
+  opened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(opened.ok()) << opened.status().message();
+  ASSERT_TRUE(opened.value()->Delete("a").ok());
+  expect_manifest(3, 3);
+  EXPECT_EQ(opened.value()->Get("a").status().code(), tinylsm::StatusCode::kNotFound);
+
+  ASSERT_TRUE(opened.value()->Put("a", "new-a").ok());
+  expect_manifest(4, 4);
+  EXPECT_EQ(opened.value()->Get("a").value(), "new-a");
+
+  ASSERT_TRUE(opened.value()->Delete("b").ok());
+  expect_manifest(5, 5);
+  auto final_scan = opened.value()->Scan("", "");
+  ASSERT_TRUE(final_scan.ok());
+  EXPECT_EQ(final_scan.value(), (std::vector<tinylsm::Entry>{{"a", "new-a"}}));
   EXPECT_TRUE(opened.value()->Close().ok());
 
   auto reopened = tinylsm::DB::Open(dir.path(), options);
   ASSERT_TRUE(reopened.ok()) << reopened.status().message();
-  EXPECT_TRUE(reopened.value()->Get("a").ok());
-  EXPECT_EQ(reopened.value()->Get("z").value(), std::string(40, 'n'));
+  EXPECT_EQ(reopened.value()->Get("a").value(), "new-a");
+  EXPECT_EQ(reopened.value()->Get("b").status().code(), tinylsm::StatusCode::kNotFound);
 }
 
 TEST(DBTest, OpensAndReadsMultipleManifestTablesInOldestToNewestOrder) {
