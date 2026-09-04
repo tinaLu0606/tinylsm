@@ -4,6 +4,7 @@ add_library(tinylsm::tinylsm ALIAS tinylsm)
 target_sources(tinylsm PRIVATE
   db/db.cpp db/db_impl.cpp
   io/file.cpp
+  iterator/internal_iterator.cpp
   manifest/manifest_codec.cpp manifest/manifest_state.cpp
   memtable/memtable.cpp
   sstable/sstable_builder.cpp sstable/sstable_reader.cpp

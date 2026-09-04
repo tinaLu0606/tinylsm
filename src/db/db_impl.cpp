@@ -3,9 +3,9 @@
 #include <algorithm>
 #include <iomanip>
 #include <limits>
-#include <map>
 #include <sstream>
 
+#include "iterator/internal_iterator.h"
 #include "sstable/sstable_builder.h"
 #include "util/bytewise_less.h"
 #include "wal/wal_reader.h"
@@ -460,44 +460,40 @@ Result<std::vector<Entry>> DB::Impl::Scan(std::string_view begin,
   if (manifest_ && manifest_->current().live_tables.size() != tables_.size())
     return Status::Corruption("Manifest and Reader table sets differ");
 
-  std::map<std::string, internal::InternalEntry, internal::BytewiseLess> merged;
-
-  const auto merge = [&](internal::InternalEntry entry) -> Status {
-    auto [it, inserted] = merged.try_emplace(entry.user_key, std::move(entry));
-    if (inserted)
-      return Status::Ok();
-    if (it->second.sequence == entry.sequence)
-      return Status::Corruption("duplicate key has the same sequence");
-    if (it->second.sequence < entry.sequence)
-      it->second = std::move(entry);
-    return Status::Ok();
-  };
+  std::vector<std::unique_ptr<internal::InternalIterator>> inputs;
+  inputs.reserve(tables_.size() + 1);
 
   for (std::size_t i = 0; i < tables_.size(); ++i) {
     const auto& meta = manifest_->current().live_tables[i];
     if ((!end.empty() && !less(meta.smallest_key, end)) ||
         less(meta.largest_key, begin))
       continue;
-    auto disk = tables_[i]->Scan(begin, end);
+    auto disk = tables_[i]->NewIterator(begin, end);
     if (!disk.ok())
       return disk.status();
-    for (auto& entry : disk.value()) {
-      auto merged_status = merge(std::move(entry));
-      if (!merged_status.ok())
-        return merged_status;
-    }
+    inputs.push_back(std::move(disk.value()));
   }
 
-  for (auto& entry : memtable_.Scan(begin, end)) {
-    auto merged_status = merge(std::move(entry));
-    if (!merged_status.ok())
-      return merged_status;
-  }
+  auto memory = memtable_.NewIterator(begin, end);
+  if (!memory.ok())
+    return memory.status();
+  inputs.push_back(std::move(memory.value()));
+
+  auto merged = internal::NewMergingIterator(std::move(inputs));
+  if (!merged.ok())
+    return merged.status();
 
   std::vector<Entry> out;
-  for (auto& [key, e] : merged)
-    if (e.type == internal::ValueType::kValue)
-      out.push_back({key, e.value});
+  while (merged.value()->Valid()) {
+    const auto& entry = merged.value()->entry();
+    if (entry.type == internal::ValueType::kValue)
+      out.push_back({entry.user_key, entry.value});
+    auto next = merged.value()->Next();
+    if (!next.ok())
+      return next;
+  }
+  if (!merged.value()->status().ok())
+    return merged.value()->status();
   return out;
 }
 Status DB::Impl::Close() {

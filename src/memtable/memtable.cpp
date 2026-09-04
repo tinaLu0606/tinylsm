@@ -1,5 +1,6 @@
 #include "memtable/memtable.h"
 
+#include <cassert>
 #include <utility>
 
 namespace tinylsm::internal {
@@ -8,6 +9,37 @@ std::size_t EntryBytes(const InternalEntry& entry) {
   return sizeof(InternalEntry) + entry.user_key.size() + entry.value.size();
 }
 } // namespace
+
+class MemTable::Iterator final : public InternalIterator {
+public:
+  Iterator(const MemTable& source, std::string_view begin, std::string_view end)
+      : current_(source.entries_.lower_bound(begin)), finish_(source.entries_.end()),
+        end_(end) {}
+
+  [[nodiscard]] bool Valid() const noexcept override {
+    return current_ != finish_ &&
+           (end_.empty() || BytewiseLess{}(current_->first, end_));
+  }
+
+  [[nodiscard]] const InternalEntry& entry() const override {
+    assert(Valid());
+    return current_->second;
+  }
+
+  Status Next() override {
+    if (Valid())
+      ++current_;
+    return Status::Ok();
+  }
+
+  [[nodiscard]] const Status& status() const noexcept override { return status_; }
+
+private:
+  decltype(entries_)::const_iterator current_;
+  decltype(entries_)::const_iterator finish_;
+  std::string end_;
+  Status status_;
+};
 
 Status MemTable::Apply(InternalEntry entry) {
   auto it = entries_.find(entry.user_key);
@@ -31,6 +63,14 @@ Result<InternalEntry> MemTable::Get(std::string_view key) const {
   if (it == entries_.end())
     return Status::NotFound("key is absent");
   return it->second;
+}
+
+Result<std::unique_ptr<InternalIterator>>
+MemTable::NewIterator(std::string_view begin, std::string_view end) const {
+  const BytewiseLess less;
+  if (!end.empty() && less(end, begin))
+    return Status::InvalidArgument("iterator begin is greater than end");
+  return std::unique_ptr<InternalIterator>(new Iterator(*this, begin, end));
 }
 
 std::vector<InternalEntry> MemTable::Scan(std::string_view begin,

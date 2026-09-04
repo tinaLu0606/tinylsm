@@ -6,6 +6,7 @@
 #include <string_view>
 #include <vector>
 
+#include "iterator/internal_iterator.h"
 #include "model/internal_entry.h"
 #include "tinylsm/result.h"
 #include "util/bytewise_less.h"
@@ -20,6 +21,9 @@ public:
   Status Apply(InternalEntry entry);
   [[nodiscard]] Result<InternalEntry> Get(std::string_view key) const;
 
+  [[nodiscard]] Result<std::unique_ptr<InternalIterator>>
+  NewIterator(std::string_view begin, std::string_view end) const;
+
   /// Materializes entries in byte-wise key order over [begin, end). An empty
   /// `end` means that the range is unbounded above.
   [[nodiscard]] std::vector<InternalEntry> Scan(std::string_view begin,
@@ -31,6 +35,7 @@ public:
   void Clear();
 
 private:
+  class Iterator;
   std::map<std::string, InternalEntry, BytewiseLess> entries_;
   std::size_t bytes_ = 0;
 };

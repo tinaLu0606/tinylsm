@@ -3,10 +3,10 @@
 ## 状态
 
 - 最近更新：2026-09-04
-- 状态：`实施中（前两阶段已完成）`
+- 状态：`实施中（前三阶段已完成）`
 - 定位：分阶段实现与验收依据
 
-前两阶段已完成 Manifest 双版本、多表读取基础、Open metadata 校验、重复 flush 和 active WAL sequence 恢复校验；内部 iterator、compaction 与 orphan cleanup 仍待后续阶段实现。
+前三阶段已完成 Manifest 双版本、多表读取基础、Open metadata 校验、重复 flush、active WAL sequence 恢复校验，以及内部 iterator/多路归并 Scan；compaction 与 orphan cleanup 仍待后续阶段实现。
 
 V3 把原路线中的多 SSTable、同步 compaction，以及 Scan 所需的内部归并 iterator 合并为一个阶段。
 
@@ -450,7 +450,7 @@ Manifest visible 但目录 sync 失败
 
 1. **已完成（2026-09-04）**：Manifest 多表 schema、format-v1 golden fixture、双版本读取和不变量测试；`ManifestSnapshot::live_table` 与 `DB::Impl::table_` 已改为 vector，live SSTable properties 会在 Open 时完整校验；DB 已能读取零到多张表，并暂时保留第二次 flush 限制；
 2. **已完成（2026-09-04）**：支持重复 flush，将新表追加到 Manifest/Reader 的 oldest-to-newest table set；active WAL sequence 必须严格递增且大于 Manifest `last_sequence`，允许合法空洞；已覆盖每次 flush 后读取、关闭重开、继续 flush、value/tombstone 覆盖以及第二次 flush 的提交故障矩阵；
-3. 按第 4 节合同实现 MemTable/SSTable iterator、多路归并和完整 Scan；测试同 key 去重、范围边界、sticky error 以及后续 block 失败时不返回部分结果；
+3. **已完成（2026-09-04）**：按第 4 节合同实现 MemTable/SSTable iterator、多路归并和完整 Scan；已覆盖同 key 去重、范围边界、sticky error，以及后续 block 失败时不返回部分结果；
 4. 实现同步 `DB::Compact()`；提交前准备好 replacement Reader、Manifest metadata 和 vector 容量，提交后只做不抛异常的 swap/move 与 best-effort cleanup；同时覆盖零表、一表、全 tombstone 和各提交阶段失败；
 5. 实现共享 filename parser 与 `CleanupObsoleteFiles()`，扩展 `ListDir`、随机读等故障注入能力；测试误删保护、删除失败重试和文件编号边界；
 6. 运行跨模块故障矩阵和 V0-V2 全量回归，更新 README，再执行全部构建、格式、lint 和 sanitizer 验证。

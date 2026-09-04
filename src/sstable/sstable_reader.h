@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "io/file.h"
+#include "iterator/internal_iterator.h"
 #include "model/internal_entry.h"
 #include "sstable/sstable_format.h"
 
@@ -28,11 +29,15 @@ public:
   Result<SSTableProperties> ValidateAndGetProperties() const;
   Result<InternalEntry> Get(std::string_view key) const;
 
+  Result<std::unique_ptr<InternalIterator>> NewIterator(std::string_view begin,
+                                                        std::string_view end) const;
+
   /// Materializes entries in [begin, end); an empty `end` is unbounded above.
   Result<std::vector<InternalEntry>> Scan(std::string_view begin,
                                           std::string_view end) const;
 
 private:
+  class Iterator;
   SSTableReader(std::unique_ptr<RandomAccessFile> file, std::uint64_t file_size,
                 std::vector<BlockMeta> blocks)
       : file_(std::move(file)), file_size_(file_size), blocks_(std::move(blocks)) {}

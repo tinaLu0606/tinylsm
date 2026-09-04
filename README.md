@@ -8,7 +8,8 @@ publication.
 The project is intentionally small enough to inspect end to end. It is a
 learning-oriented prototype rather than a production database. The current
 write path supports repeated synchronous flushes into an ordered set of
-SSTables; compaction and concurrent access are not implemented.
+SSTables, and range scans lazily merge those tables; compaction and concurrent
+access are not implemented.
 
 ## Quick start
 
@@ -218,6 +219,7 @@ The main modules are:
 - `src/sstable`: immutable table builder, reader, block index, and format.
 - `src/manifest`: persistent metadata codec and publication protocol.
 - `src/io`: filesystem interfaces and POSIX implementation.
+- `src/iterator`: internal merge iteration shared by scans and compaction.
 - `tools/cli`: argument parsing and CLI command handlers.
 - `tools/lab_web`: experimental Lab UI maintained as a Git submodule.
 
@@ -245,11 +247,12 @@ that no older visible value remains.
 searches live SSTables from newest to oldest. A tombstone is returned internally
 as the newest state but exposed to the caller as `NotFound`.
 
-`Scan` currently materializes the ordered range from each live SSTable and the
-MemTable, merges entries by byte-wise key order, chooses the newest sequence for
-duplicate keys, and removes tombstones from the public result. A later V3 stage
-will replace the per-table materialization with internal lazy iterators without
-changing the public `vector<Entry>` result.
+`Scan` creates borrowing iterators for the MemTable and each relevant SSTable,
+then lazily merges them in byte-wise key order. Duplicate keys resolve to the
+largest sequence and tombstones are removed from the public result. SSTable
+iterators keep at most one decoded block at a time; a later block failure makes
+the whole scan fail instead of returning a partial result. The public API still
+materializes the final `vector<Entry>`.
 
 ### Flush commit protocol
 
