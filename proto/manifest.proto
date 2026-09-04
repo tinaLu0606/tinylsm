@@ -15,5 +15,5 @@ message ManifestSnapshotProto {
   uint64 active_wal_number = 1;
   uint64 next_file_number = 2;
   uint64 last_sequence = 3;
-  optional TableMetaProto live_table = 4;
+  repeated TableMetaProto live_tables = 4;
 }

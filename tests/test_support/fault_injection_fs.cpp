@@ -6,6 +6,35 @@
 namespace tinylsm::test {
 namespace {
 
+class FaultRandomAccessFile final : public internal::RandomAccessFile {
+public:
+  FaultRandomAccessFile(std::filesystem::path path,
+                        std::unique_ptr<internal::RandomAccessFile> inner,
+                        std::shared_ptr<FaultPlan> plan)
+      : path_(std::move(path)), inner_(std::move(inner)), plan_(std::move(plan)) {}
+
+  Result<std::size_t> ReadAt(std::uint64_t offset,
+                             std::span<std::byte> buffer) const override {
+    if (auto failure =
+            plan_->MaybeFail(FaultOperation::kReadAt, path_, FaultTiming::kBefore))
+      return *failure;
+    auto read = inner_->ReadAt(offset, buffer);
+    if (!read.ok())
+      return read.status();
+    if (auto failure =
+            plan_->MaybeFail(FaultOperation::kReadAt, path_, FaultTiming::kAfter))
+      return *failure;
+    return read.value();
+  }
+
+  Result<std::uint64_t> Size() const override { return inner_->Size(); }
+
+private:
+  std::filesystem::path path_;
+  std::unique_ptr<internal::RandomAccessFile> inner_;
+  std::shared_ptr<FaultPlan> plan_;
+};
+
 class FaultWritableFile final : public internal::WritableFile {
 public:
   FaultWritableFile(std::filesystem::path path,
@@ -71,7 +100,17 @@ public:
 
   Result<std::unique_ptr<internal::RandomAccessFile>>
   OpenRandomAccess(const std::filesystem::path& path) override {
-    return inner_->OpenRandomAccess(path);
+    if (auto failure = plan_->MaybeFail(FaultOperation::kOpenRandomAccess, path,
+                                        FaultTiming::kBefore))
+      return *failure;
+    auto file = inner_->OpenRandomAccess(path);
+    if (!file.ok())
+      return file.status();
+    if (auto failure = plan_->MaybeFail(FaultOperation::kOpenRandomAccess, path,
+                                        FaultTiming::kAfter))
+      return *failure;
+    return std::unique_ptr<internal::RandomAccessFile>(
+        new FaultRandomAccessFile(path, std::move(file.value()), plan_));
   }
 
   Result<std::unique_ptr<internal::WritableFile>>

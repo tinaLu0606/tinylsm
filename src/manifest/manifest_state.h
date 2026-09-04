@@ -47,8 +47,9 @@ public:
 
   /// Publishes `next` through a synced temporary file, rename, and directory
   /// sync. The outcome distinguishes a pre-rename failure from an uncertain
-  /// directory-sync failure. current() changes only for a durable publication.
-  ManifestPublishOutcome Publish(const ManifestSnapshot& next);
+  /// directory-sync failure. The by-value snapshot is fully allocated before
+  /// publication and moves into current() only after durable directory sync.
+  ManifestPublishOutcome Publish(ManifestSnapshot next);
   [[nodiscard]] const ManifestSnapshot& current() const { return current_; }
 
 private:

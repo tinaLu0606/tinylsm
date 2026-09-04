@@ -10,12 +10,22 @@
 
 namespace tinylsm::internal {
 
+struct SSTableProperties {
+  std::uint64_t file_size = 0;
+  std::string smallest_key;
+  std::string largest_key;
+  std::uint64_t min_sequence = 0;
+  std::uint64_t max_sequence = 0;
+};
+
 /// Reads an immutable SSTable using its in-memory index and on-demand blocks.
 class SSTableReader {
 public:
   /// Validates and loads the footer and index without loading all data blocks.
   static Result<std::unique_ptr<SSTableReader>>
   Open(std::unique_ptr<RandomAccessFile> file);
+  [[nodiscard]] std::uint64_t file_size() const { return file_size_; }
+  Result<SSTableProperties> ValidateAndGetProperties() const;
   Result<InternalEntry> Get(std::string_view key) const;
 
   /// Materializes entries in [begin, end); an empty `end` is unbounded above.
@@ -23,10 +33,12 @@ public:
                                           std::string_view end) const;
 
 private:
-  SSTableReader(std::unique_ptr<RandomAccessFile> file, std::vector<BlockMeta> blocks)
-      : file_(std::move(file)), blocks_(std::move(blocks)) {}
+  SSTableReader(std::unique_ptr<RandomAccessFile> file, std::uint64_t file_size,
+                std::vector<BlockMeta> blocks)
+      : file_(std::move(file)), file_size_(file_size), blocks_(std::move(blocks)) {}
   Result<std::vector<InternalEntry>> ReadBlock(const BlockMeta& meta) const;
   std::unique_ptr<RandomAccessFile> file_;
+  std::uint64_t file_size_ = 0;
   std::vector<BlockMeta> blocks_;
 };
 

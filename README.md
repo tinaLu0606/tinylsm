@@ -6,9 +6,9 @@ SSTables, manifest-based recovery, tombstones, checksums, and crash-aware file
 publication.
 
 The project is intentionally small enough to inspect end to end. It is a
-learning-oriented prototype rather than a production database: the current
-version supports one published SSTable and performs synchronous flushing, but it
-does not yet implement compaction or concurrent access.
+learning-oriented prototype rather than a production database. The current
+reader can recover an ordered set of SSTables, while the write path still stops
+before a second flush; compaction and concurrent access are not implemented.
 
 ## Quick start
 
@@ -140,10 +140,12 @@ and are not thread-safe; callers must synchronize shared access externally.
 
 - WAL-first `Put` and `Delete`, with optional per-write synchronization.
 - An ordered MemTable that keeps the newest sequence for each user key.
-- Immutable, block-indexed SSTables with CRC32C integrity checks.
+- Immutable, block-indexed SSTables with CRC32C integrity checks and complete
+  validation of Manifest-referenced table data during startup.
 - Tombstones that hide deleted values across memory and disk.
 - Half-open ordered range scans that merge MemTable and SSTable state.
-- A Manifest that records the authoritative WAL, SSTable, and sequence state.
+- A versioned Manifest snapshot that records the authoritative WAL, ordered
+  SSTable set, and sequence state while retaining version-1 read compatibility.
 - Startup recovery through Manifest loading and active-WAL replay.
 - Detection of malformed records, truncated data, checksum failures, invalid
   ordering, missing files, and size mismatches.
@@ -174,9 +176,9 @@ and are not thread-safe; callers must synchronize shared access externally.
                                         | flush
                                         v
                                   +-----------+
-                                  |  SSTable  |
+                                  | SSTables  |
                                   | blocks +  |
-                                  | index     |
+                                  | indexes   |
                                   +-----------+
 
                  +-------------------------------+
@@ -220,12 +222,14 @@ that no older visible value remains.
 ### Read and scan paths
 
 `Get` checks the MemTable first because it contains newer sequence numbers, then
-falls back to the SSTable. A tombstone is returned internally as the newest state
-but exposed to the caller as `NotFound`.
+searches live SSTables from newest to oldest. A tombstone is returned internally
+as the newest state but exposed to the caller as `NotFound`.
 
-`Scan` reads the ordered memory and disk ranges, merges entries by byte-wise key
-order, chooses the newest sequence for duplicate keys, and removes tombstones
-from the public result.
+`Scan` currently materializes the ordered range from each live SSTable and the
+MemTable, merges entries by byte-wise key order, chooses the newest sequence for
+duplicate keys, and removes tombstones from the public result. A later V3 stage
+will replace the per-table materialization with internal lazy iterators without
+changing the public `vector<Entry>` result.
 
 ### Flush commit protocol
 
@@ -251,7 +255,8 @@ durability guarantee, and the caller must close and reopen the database.
 ```text
 Open database
     -> load the authoritative Manifest
-    -> validate and open its referenced SSTable
+    -> validate and open every referenced SSTable
+    -> read all live data blocks and verify true key/sequence metadata
     -> replay its active WAL into a fresh MemTable
     -> truncate an incomplete WAL tail when recoverable
     -> continue from the highest recovered sequence number
@@ -261,12 +266,19 @@ Checksums detect accidental corruption in encoded WAL records, SSTable blocks,
 and persisted metadata. Structural validation separately checks lengths, file
 boundaries, ordering, indexes, and sequence metadata.
 
+Manifest version 2 stores live tables in oldest-to-newest order and protects the
+header plus Protobuf payload with CRC32C. The reader also accepts fixed version-1
+zero-table and single-table snapshots. Because the current SSTable format has no
+table-level sequence properties block, startup reads every live data block to
+verify the Manifest metadata; Open therefore costs `O(total live SSTable bytes)`.
+
 ## Current limitations
 
 TinyLSM currently favors clarity and testability over feature breadth:
 
-- Only one published SSTable is supported; a later write that would require a
-  second flush returns `NotSupported`.
+- Recovery and reads support multiple Manifest-referenced SSTables, but the
+  writer can publish only the first SSTable; a later write that would require a
+  second flush returns `NotSupported` before sequence, WAL, or MemTable mutation.
 - There is no compaction, multi-level layout, Bloom filter, or block cache.
 - Flushes are synchronous; there is no immutable-MemTable/background worker.
 - There is no transaction, write batch, snapshot, or concurrent writer support.

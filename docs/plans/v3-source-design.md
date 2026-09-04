@@ -2,9 +2,11 @@
 
 ## 状态
 
-- 最近更新：2026-09-03
-- 状态：`待确认、待实现`
-- 定位：实现前审阅版
+- 最近更新：2026-09-04
+- 状态：`实施中（第一阶段已完成）`
+- 定位：分阶段实现与验收依据
+
+第一阶段已完成 Manifest 双版本、多表读取基础和 Open metadata 校验；重复 flush、内部 iterator、compaction 与 orphan cleanup 仍待后续阶段实现。
 
 V3 把原路线中的多 SSTable、同步 compaction，以及 Scan 所需的内部归并 iterator 合并为一个阶段。
 
@@ -52,6 +54,8 @@ V3 不包含：
 | Tombstone | flush 保留；full compaction 才允许删除 |
 | 状态管理 | 继续使用 `ManifestState`，暂不引入 `VersionSet` |
 | Commit point | 新 Manifest durable |
+| 编号文件名 | 十进制编号至少六位；超过六位后自然扩展，解析后必须能规范化 round-trip |
+| Open metadata 校验 | V3 不升级 SSTable 格式；Open 完整读取每张 live SSTable，计算并核对真实 metadata |
 
 暂不自动 compaction。否则 Put 的 flush 已经 durable、后续维护性 compaction 却失败时，Put 应返回成功还是失败会变得含糊。
 
@@ -114,6 +118,97 @@ MemTable 和每张 SSTable 提供内部 iterator。多路归并器按 key 排序
 
 内部 iterator 惰性跨 block 读取；public `Scan()` 仍物化最终结果。
 
+### 内部 Iterator 合同
+
+V3 引入一个仅供存储模块使用的前向 iterator 接口，不暴露到 public API：
+
+```cpp
+class InternalIterator {
+public:
+  virtual ~InternalIterator() = default;
+
+  [[nodiscard]] virtual bool Valid() const noexcept = 0;
+  [[nodiscard]] virtual const InternalEntry& entry() const = 0;
+  virtual Status Next() = 0;
+  [[nodiscard]] virtual const Status& status() const noexcept = 0;
+};
+
+Result<std::unique_ptr<InternalIterator>>
+SSTableReader::NewIterator(std::string_view begin,
+                           std::string_view end) const;
+
+Result<std::unique_ptr<InternalIterator>>
+MemTable::NewIterator(std::string_view begin,
+                      std::string_view end) const;
+
+Result<std::unique_ptr<InternalIterator>>
+NewMergingIterator(std::vector<std::unique_ptr<InternalIterator>> inputs);
+```
+
+共同语义：
+
+- factory 成功后，iterator 已定位到 `[begin, end)` 中第一条记录；空范围返回 `Valid() == false` 且 `status().ok()`；
+- 只有 `Valid() == true` 时才能调用 `entry()`，引用只保证在本 iterator 下一次 `Next()` 前有效；
+- `Next()` 成功时移动到下一条或正常 EOF；IO、CRC 或格式错误返回非 OK，并把 iterator 置为 sticky error；
+- error 和 EOF 时 `Valid() == false`，两者由 `status()` 区分；error 后再次 `Next()` 返回同一错误；
+- iterator 不可复制、可以移动，不允许越过其借用的数据源生命周期。
+
+`SSTableIterator` 借用 `SSTableReader`，只持有当前 block 解码后的 entries、block 下标和 entry 下标。创建时通过 index 定位第一个候选 block；`Next()` 仅在当前 block 用尽后读取下一相关 block，因此一次最多为每张表保留一个已解码 block。
+
+`MemTableIterator` 借用 `MemTable` 的有序 map。TinyLSM 不支持并发，`DB::Scan()` 执行期间不会写 MemTable，因此 iterator 存活期间不会发生使其失效的修改。
+
+`MergingIterator` 拥有所有输入 iterator，并用最小堆选择 byte-wise 最小 key。对于同一个 key：
+
+1. 收集当前位于该 key 的全部输入；
+2. 选择 sequence 最大的记录作为当前输出，包括 tombstone；
+3. `Next()` 时推进该 key 对应的全部输入，再选择下一个 key；
+4. 相同 key 出现相同 sequence 返回 `Corruption`，因为全局 sequence 和 Manifest range 合同不允许这种状态；
+5. 任一输入报错时立即进入 sticky error，不再产生后续记录。
+
+`DB::Scan()` 消费 merge iterator，将 value 复制进局部结果 vector 并过滤 tombstone。只有 iterator 正常到达 EOF 才返回 vector；中途失败时丢弃局部结果并返回错误。`Compact()` 使用同一个 merge iterator 和相同的 winner 规则，只把 value 写入 replacement SSTable。
+
+生命周期固定为：
+
+```text
+DB owns MemTable/readers
+  -> local source iterators borrow them
+  -> local MergingIterator owns source iterators
+  -> Scan/compaction consumes and destroys MergingIterator
+  -> compaction 才能 swap readers、关闭旧 reader、清理旧文件
+```
+
+因此 compaction 必须在调用 `ManifestState::Publish()` 前完成 iterator 消费并销毁所有借用旧 Reader 的 iterator；commit 后不再保留 iterator，也不会因 table-set swap 产生悬空引用。
+
+### Open 时核对 SSTable metadata
+
+当前 SSTable index 只有 block 的首尾 key，没有 table-level sequence 范围。V3 不为此引入新的 SSTable format；`SSTableReader` 增加内部校验接口：
+
+```cpp
+struct SSTableProperties {
+  std::uint64_t file_size;
+  std::string smallest_key;
+  std::string largest_key;
+  std::uint64_t min_sequence;
+  std::uint64_t max_sequence;
+};
+
+Result<SSTableProperties> SSTableReader::ValidateAndGetProperties() const;
+```
+
+`ValidateAndGetProperties()` 完整读取一次所有 data block，验证每个 block 的 CRC、entry 顺序、index 首尾 key 与实际 block 首尾 key一致、跨 block key 严格递增、sequence 大于 0，并计算真实 properties。空 SSTable 返回 `Corruption`。
+
+`DB::Open()` 对每个 `live_tables` 项按以下顺序执行：
+
+1. 核对文件存在和实际 file size；
+2. `SSTableReader::Open()` 校验 footer 与 index；
+3. `ValidateAndGetProperties()` 完整校验数据并计算 properties；
+4. 将 file size、smallest/largest key、min/max sequence 与 Manifest 精确比较；
+5. 所有 Reader 和 vector 容量准备成功后，才一次性装入 `tables_`。
+
+任一步失败都返回 `Corruption` 或带上下文的 IO error，且不能留下部分打开的 DB。完成上述校验前不能使用 Manifest key range 跳表。
+
+这会让 V3 的 Open 成本成为 `O(全部 live SSTable bytes)`。对当前学习型、无 benchmark 目标的版本优先保证 metadata 可验证；以后若启动成本成为实际问题，再通过带 checksum 的 SSTable properties block 升级格式，而不是在 V3 同时扩张两套持久化格式。
+
 ## 5. Flush 与 Compaction
 
 重复 flush：
@@ -155,6 +250,14 @@ full compaction 覆盖全部磁盘表，因此可以安全删除 tombstone。特
 - 一张表：允许重写；
 - 结果全是 tombstone：发布零张表，不制造空 SSTable；
 - in-memory DB：返回 `NotSupported`。
+
+Compaction 的文件编号与状态变化合同：
+
+- 非空输出使用 `current.next_file_number` 创建 replacement SSTable，成功发布后把 `next_file_number` 加一；
+- builder 在遇到第一条 value 时才延迟创建，因此全 tombstone 结果不创建临时/空 SSTable，也不消耗 file number；
+- `active_wal_number`、`last_sequence`、`next_sequence_`、MemTable 和当前 WAL handle 全部保持不变；
+- compaction 路径禁止创建 replacement WAL；replacement WAL 只属于 Flush；
+- active WAL 中比磁盘表更新的 value/tombstone 继续由 MemTable 覆盖 compacted table。
 
 ## 6. Manifest V3 格式
 
@@ -346,9 +449,9 @@ Manifest visible 但目录 sync 失败
 
 原则：每一步同时实现对应测试并保持仓库可编译、可运行；不能等功能全部完成后再集中补测试，也不能先写出当前 DB 无法读取的新状态。
 
-1. 完成 Manifest 多表 schema、format-v1 golden fixture、双版本读取和不变量测试；同时把 `ManifestSnapshot::live_table` 与 `DB::Impl::table_` 改为 vector，使 DB 能打开零到多张表，但暂时保留第二次 flush 限制；
+1. **已完成（2026-09-04）**：Manifest 多表 schema、format-v1 golden fixture、双版本读取和不变量测试；`ManifestSnapshot::live_table` 与 `DB::Impl::table_` 已改为 vector，live SSTable properties 会在 Open 时完整校验；DB 已能读取零到多张表，并暂时保留第二次 flush 限制；
 2. 完成重复 flush、多表 Get 和 WAL sequence 恢复校验；测试每次 flush 后的当前读取、关闭重开以及 value/tombstone 覆盖；
-3. 定义内部 iterator 的生命周期、错误状态和 `Next()` 合同，实现 SSTable 跨 block iterator、多路归并和完整 Scan；测试同 key 去重、范围边界以及后续 block 失败时不返回部分结果；
+3. 按第 4 节合同实现 MemTable/SSTable iterator、多路归并和完整 Scan；测试同 key 去重、范围边界、sticky error 以及后续 block 失败时不返回部分结果；
 4. 实现同步 `DB::Compact()`；提交前准备好 replacement Reader、Manifest metadata 和 vector 容量，提交后只做不抛异常的 swap/move 与 best-effort cleanup；同时覆盖零表、一表、全 tombstone 和各提交阶段失败；
 5. 实现共享 filename parser 与 `CleanupObsoleteFiles()`，扩展 `ListDir`、随机读等故障注入能力；测试误删保护、删除失败重试和文件编号边界；
 6. 运行跨模块故障矩阵和 V0-V2 全量回归，更新 README，再执行全部构建、格式、lint 和 sanitizer 验证。
@@ -373,14 +476,15 @@ Compaction 与提交：
 
 - compaction 前后、重启前后 Get/Scan 逻辑结果等价；
 - 覆盖零表、一表、结果全为 tombstone、in-memory、closed 和 terminal-state；
-- SSTable、replacement WAL、Manifest 的 commit 前失败恢复旧状态，Manifest durable 后恢复新状态，visible-not-durable 进入 terminal state；
+- Flush 的 SSTable、replacement WAL、Manifest 在 commit 前失败时恢复旧状态，Manifest durable 后恢复新状态，visible-not-durable 进入 terminal state；
+- Compaction 只覆盖 replacement SSTable 与 Manifest 的失败阶段；测试必须确认它不创建或更换 WAL，且 `active_wal_number` 保持不变；
 - Manifest commit 后的 Reader/vector 切换不再分配内存或执行可失败的正确性步骤；
 
 Cleanup 与回归：
 
 - 扩展故障注入以覆盖 `ListDir`、`OpenRandomAccess`/`ReadAt`、`Remove` 和 `SyncDir`；
 - commit 前 orphan、旧 WAL、compaction 输入表删除失败后可在当前进程或下次 Open 重试；active 文件和无关文件绝不删除；
-- filename parser 覆盖 `000001`、`999999`、`1000000`、整数溢出、非法后缀和非规范名称；
+- filename parser 接受 `000001`、`999999`、`1000000`，拒绝零、整数溢出、非法后缀和不能规范化 round-trip 的名称；
 - 连续 flush/compaction 后目录只保留 Manifest 引用文件及允许的无关文件；
 - V0-V2 回归测试全部通过。故障注入验证系统调用失败处理，不宣称等价于真实断电测试。
 
@@ -406,6 +510,40 @@ V3 完成后，再安排 install/package，并重新讨论并发、自动 compac
 ### 风险判断
 
 正常文件系统上，关闭旧 WAL/SSTable 后删除失败的概率较低。但 V3 支持重复 flush 和 compaction，运行次数不再有上限；进程也可能恰好在 Manifest 提交后、删除旧文件前崩溃。因此单次低概率不能保证生命周期内不累积，应该在 V3 一并处理。
+
+### 编号文件名规范
+
+共享 filename 模块替代 `db_impl.cpp` 中只接受六位数字的 `IsNumberedFile()`，同时提供 format 和 parse，供 Open、Flush、Compaction 与 Cleanup 使用。
+
+规范名称为：
+
+```text
+<canonical-decimal>.wal
+<canonical-decimal>.sst
+<canonical-decimal>.sst.tmp
+```
+
+其中 `<canonical-decimal>` 的规则是：
+
+- file number 必须在 `[1, UINT64_MAX]`；
+- `1..999999` 左侧补零到六位，例如 `1 -> 000001`；
+- 从 `1000000` 开始使用不带前导零的自然十进制，位数不设六位上限；
+- parser 只接受 ASCII 数字，必须完整消费数字部分并检查 `uint64_t` 溢出；
+- parse 后重新 format 必须与原文件名逐字节相同，否则视为非规范名称，不参与自动清理。
+
+示例：
+
+| 名称 | 结果 |
+|---|---|
+| `000001.sst` | 接受，编号 1 |
+| `999999.wal` | 接受，编号 999999 |
+| `1000000.sst.tmp` | 接受，编号 1000000 |
+| `1.sst`、`0000001.sst` | 拒绝，不能规范化 round-trip |
+| `000000.wal` | 拒绝，编号 0 非法 |
+| `+000001.sst`、含空白名称 | 拒绝，只允许 ASCII 数字 |
+| 超过 `UINT64_MAX` 的十进制 | 拒绝，整数溢出 |
+
+Cleanup 只删除 parser 成功识别且确认不在 Manifest live set 中的文件。解析失败的近似名称和无关文件一律保留。
 
 ### 清理规则
 

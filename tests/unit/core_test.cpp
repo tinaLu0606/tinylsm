@@ -1,17 +1,21 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <stdexcept>
+#include <string>
+#include <vector>
 
 #include "manifest/manifest_codec.h"
 #include "memtable/memtable.h"
 #include "sstable/sstable_format.h"
 #include "tinylsm/result.h"
 #include "util/coding.h"
+#include "util/crc32c.h"
 #include "wal/wal_reader.h"
 #include "wal/wal_record_codec.h"
 
@@ -35,6 +39,40 @@ private:
   std::size_t chunk_;
   std::size_t offset_ = 0;
 };
+
+std::string ManifestFrame(std::uint16_t version, std::string_view payload) {
+  std::string frame;
+  ti::PutFixed32(frame, 0x31464e4dU);
+  ti::PutFixed16(frame, version);
+  ti::PutFixed16(frame, 0);
+  ti::PutFixed32(frame, static_cast<std::uint32_t>(payload.size()));
+  const auto checksum = version == 1
+                            ? ti::Crc32c(ti::AsBytes(payload))
+                            : ti::Crc32c(ti::AsBytes(frame), ti::AsBytes(payload));
+  ti::PutFixed32(frame, checksum);
+  frame += payload;
+  return frame;
+}
+
+std::string ManifestPayload(const std::string& frame) {
+  return frame.substr(ti::kManifestHeaderBytes);
+}
+
+bool LegacyV1FrameGateAccepts(const std::string& frame) {
+  if (frame.size() < ti::kManifestHeaderBytes)
+    return false;
+  std::uint32_t magic = 0, payload_size = 0, checksum = 0;
+  std::uint16_t version = 0, flags = 0;
+  const auto bytes = ti::AsBytes(frame);
+  ti::GetFixed32(bytes, 0, magic);
+  ti::GetFixed16(bytes, 4, version);
+  ti::GetFixed16(bytes, 6, flags);
+  ti::GetFixed32(bytes, 8, payload_size);
+  ti::GetFixed32(bytes, 12, checksum);
+  return magic == 0x31464e4dU && version == 1 && flags == 0 &&
+         payload_size == frame.size() - ti::kManifestHeaderBytes &&
+         ti::Crc32c(bytes.subspan(ti::kManifestHeaderBytes)) == checksum;
+}
 } // namespace
 
 TEST(StatusTest, PreservesCodeWhileAddingDiagnosticContext) {
@@ -164,16 +202,145 @@ TEST(SstableFormatTest, ChecksOrderingAndIndependentChecksums) {
             tinylsm::StatusCode::kCorruption);
 }
 
-TEST(ManifestCodecTest, RoundTripsProtobufPayloadAndChecksFraming) {
-  ti::ManifestSnapshot snapshot{7, 11, 42, ti::TableMeta{9, 100, "a", "z", 1, 42}};
+TEST(ManifestCodecTest, ReadsFixedVersionOneGoldenFiles) {
+  const std::string empty(
+      "\x4d\x4e\x46\x31\x01\x00\x00\x00\x04\x00\x00\x00\x29\x3b\x9c\xc5"
+      "\x08\x01\x10\x02",
+      20);
+  const std::string one_table(
+      "\x4d\x4e\x46\x31\x01\x00\x00\x00\x16\x00\x00\x00\x8a\xe8\x14\xd3"
+      "\x08\x07\x10\x0b\x18\x2a\x22\x0e\x08\x09\x10\x64\x1a\x01\x61\x22"
+      "\x01\x7a\x28\x01\x30\x2a",
+      38);
+
+  auto decoded_empty = ti::ManifestCodec::Decode(ti::AsBytes(empty));
+  ASSERT_TRUE(decoded_empty.ok()) << decoded_empty.status().ToString();
+  EXPECT_EQ(decoded_empty.value(), (ti::ManifestSnapshot{1, 2, 0, {}}));
+
+  auto decoded_table = ti::ManifestCodec::Decode(ti::AsBytes(one_table));
+  ASSERT_TRUE(decoded_table.ok()) << decoded_table.status().ToString();
+  EXPECT_EQ(
+      decoded_table.value(),
+      (ti::ManifestSnapshot{7, 11, 42, {ti::TableMeta{9, 100, "a", "z", 1, 42}}}));
+}
+
+TEST(ManifestCodecTest, WritesVersionTwoAndPreservesMultipleTableOrder) {
+  const std::vector<ti::ManifestSnapshot> snapshots{
+      {1, 2, 0, {}},
+      {7, 10, 2, {{2, 100, "a", "z", 1, 2}}},
+      {7,
+       10,
+       6,
+       {{2, 100, "", "m", 1, 2},
+        {4, 200, "n", "z", 3, 4},
+        {6, 300, std::string("\x80", 1), std::string("\xff", 1), 5, 6}}}};
+
+  for (const auto& snapshot : snapshots) {
+    auto encoded = ti::ManifestCodec::Encode(snapshot);
+    ASSERT_TRUE(encoded.ok()) << encoded.status().ToString();
+
+    std::uint16_t version = 0;
+    ASSERT_TRUE(ti::GetFixed16(ti::AsBytes(encoded.value()), 4, version));
+    EXPECT_EQ(version, 2U);
+    EXPECT_FALSE(LegacyV1FrameGateAccepts(encoded.value()));
+
+    auto decoded = ti::ManifestCodec::Decode(ti::AsBytes(encoded.value()));
+    ASSERT_TRUE(decoded.ok()) << decoded.status().ToString();
+    EXPECT_EQ(decoded.value(), snapshot);
+  }
+}
+
+TEST(ManifestCodecTest, RejectsFramingChecksumAndUnknownFieldDamage) {
+  const ti::ManifestSnapshot snapshot{7, 11, 42, {{9, 100, "a", "z", 1, 42}}};
   auto encoded = ti::ManifestCodec::Encode(snapshot);
   ASSERT_TRUE(encoded.ok());
-  auto decoded = ti::ManifestCodec::Decode(ti::AsBytes(encoded.value()));
-  ASSERT_TRUE(decoded.ok());
-  EXPECT_EQ(decoded.value().active_wal_number, 7U);
-  ASSERT_TRUE(decoded.value().live_table.has_value());
-  EXPECT_EQ(decoded.value().live_table->smallest_key, "a");
-  encoded.value().back() ^= 1;
-  EXPECT_EQ(ti::ManifestCodec::Decode(ti::AsBytes(encoded.value())).status().code(),
+
+  for (const std::size_t offset : {0U, 4U, 6U, 8U, 12U, 16U}) {
+    SCOPED_TRACE(offset);
+    std::string corrupt = encoded.value();
+    corrupt[offset] ^= 1;
+    EXPECT_EQ(ti::ManifestCodec::Decode(ti::AsBytes(corrupt)).status().code(),
+              tinylsm::StatusCode::kCorruption);
+  }
+
+  std::string top_level_unknown = ManifestPayload(encoded.value());
+  top_level_unknown.append("\x28\x01", 2);
+  auto top_level = ManifestFrame(2, top_level_unknown);
+  EXPECT_EQ(ti::ManifestCodec::Decode(ti::AsBytes(top_level)).status().code(),
+            tinylsm::StatusCode::kCorruption);
+
+  std::string nested_unknown = ManifestPayload(encoded.value());
+  ASSERT_EQ(static_cast<unsigned char>(nested_unknown[6]), 0x22U);
+  ASSERT_EQ(static_cast<unsigned char>(nested_unknown[7]), 0x0eU);
+  nested_unknown[7] = static_cast<char>(0x10);
+  nested_unknown.insert(22, "\x38\x01", 2);
+  auto nested = ManifestFrame(2, nested_unknown);
+  EXPECT_EQ(ti::ManifestCodec::Decode(ti::AsBytes(nested)).status().code(),
+            tinylsm::StatusCode::kCorruption);
+
+  auto multiple = ti::ManifestCodec::Encode(
+      {7, 10, 4, {{2, 100, "a", "m", 1, 2}, {4, 100, "n", "z", 3, 4}}});
+  ASSERT_TRUE(multiple.ok());
+  auto invalid_v1 = ManifestFrame(1, ManifestPayload(multiple.value()));
+  EXPECT_EQ(ti::ManifestCodec::Decode(ti::AsBytes(invalid_v1)).status().code(),
+            tinylsm::StatusCode::kCorruption);
+
+  std::string missing_active = ManifestPayload(encoded.value());
+  missing_active.erase(0, 2);
+  auto semantic_damage = ManifestFrame(2, missing_active);
+  EXPECT_EQ(ti::ManifestCodec::Decode(ti::AsBytes(semantic_damage)).status().code(),
+            tinylsm::StatusCode::kCorruption);
+}
+
+TEST(ManifestCodecTest, EnforcesSnapshotInvariantsAndFileSizeLimit) {
+  const ti::ManifestSnapshot valid{7,
+                                   10,
+                                   6,
+                                   {{2, 100, "a", "m", 1, 2},
+                                    {4, 100, "n", "z", 3, 4},
+                                    {6, 100, "", std::string("\xff", 1), 5, 6}}};
+  std::vector<ti::ManifestSnapshot> invalid;
+
+  auto changed = valid;
+  changed.active_wal_number = 0;
+  invalid.push_back(changed);
+  changed = valid;
+  changed.next_file_number = 7;
+  invalid.push_back(changed);
+  changed = valid;
+  changed.live_tables[1].file_number = 2;
+  invalid.push_back(changed);
+  changed = valid;
+  changed.live_tables[1].file_number = 7;
+  invalid.push_back(changed);
+  changed = valid;
+  changed.live_tables[1].file_size = 0;
+  invalid.push_back(changed);
+  changed = valid;
+  changed.live_tables[1].smallest_key = "zz";
+  invalid.push_back(changed);
+  changed = valid;
+  changed.live_tables[1].min_sequence = 0;
+  invalid.push_back(changed);
+  changed = valid;
+  changed.live_tables[1].max_sequence = 7;
+  invalid.push_back(changed);
+  changed = valid;
+  changed.live_tables[1].min_sequence = 2;
+  invalid.push_back(changed);
+
+  for (const auto& snapshot : invalid) {
+    auto result = ti::ManifestCodec::Encode(snapshot);
+    EXPECT_EQ(result.status().code(), tinylsm::StatusCode::kInvalidArgument);
+  }
+
+  auto oversized = valid;
+  oversized.live_tables.back().largest_key.assign(ti::kMaxManifestFileBytes, 'x');
+  EXPECT_EQ(ti::ManifestCodec::Encode(oversized).status().code(),
+            tinylsm::StatusCode::kResourceExhausted);
+  std::string{}.swap(oversized.live_tables.back().largest_key);
+
+  std::vector<std::byte> oversized_file(ti::kMaxManifestFileBytes + 1);
+  EXPECT_EQ(ti::ManifestCodec::Decode(oversized_file).status().code(),
             tinylsm::StatusCode::kCorruption);
 }

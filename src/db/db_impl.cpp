@@ -28,6 +28,14 @@ bool IsNumberedFile(std::string_view name, std::string_view suffix) {
 internal::DecodeLimits Limits(const Options& o) {
   return {o.max_key_bytes, o.max_value_bytes};
 }
+bool Matches(const internal::TableMeta& meta,
+             const internal::SSTableProperties& properties) {
+  return meta.file_size == properties.file_size &&
+         meta.smallest_key == properties.smallest_key &&
+         meta.largest_key == properties.largest_key &&
+         meta.min_sequence == properties.min_sequence &&
+         meta.max_sequence == properties.max_sequence;
+}
 } // namespace
 
 Result<std::unique_ptr<DB::Impl>> DB::Impl::OpenInMemory() {
@@ -72,7 +80,7 @@ DB::Impl::Open(const std::filesystem::path& path, Options options,
   impl->manifest_ =
       std::make_unique<internal::ManifestState>(*impl->fs_, path, snapshot);
 
-  s = impl->OpenManifestSSTable(snapshot);
+  s = impl->OpenManifestSSTables(snapshot);
   if (!s.ok())
     return s;
 
@@ -186,32 +194,36 @@ Result<internal::ManifestSnapshot> DB::Impl::CreateInitialManifest() {
   return snapshot;
 }
 
-Status DB::Impl::OpenManifestSSTable(const internal::ManifestSnapshot& snapshot) {
-  if (!snapshot.live_table)
-    return Status::Ok();
+Status DB::Impl::OpenManifestSSTables(const internal::ManifestSnapshot& snapshot) {
+  std::vector<std::unique_ptr<internal::SSTableReader>> opened;
+  opened.reserve(snapshot.live_tables.size());
 
-  const auto sst_path = *path_ / SstName(snapshot.live_table->file_number);
-  auto table_exists = fs_->FileExists(sst_path);
-  if (!table_exists.ok())
-    return table_exists.status().WithContext("inspect Manifest SSTable");
-  if (!table_exists.value())
-    return Status::Corruption("manifest references a missing SSTable");
+  for (const auto& meta : snapshot.live_tables) {
+    const auto sst_path = *path_ / SstName(meta.file_number);
+    auto table_exists = fs_->FileExists(sst_path);
+    if (!table_exists.ok())
+      return table_exists.status().WithContext("inspect Manifest SSTable");
+    if (!table_exists.value())
+      return Status::Corruption("manifest references a missing SSTable");
 
-  auto file = fs_->OpenRandomAccess(sst_path);
-  if (!file.ok())
-    return file.status().WithContext("open Manifest SSTable");
+    auto file = fs_->OpenRandomAccess(sst_path);
+    if (!file.ok())
+      return file.status().WithContext("open Manifest SSTable");
+    auto reader = internal::SSTableReader::Open(std::move(file.value()));
+    if (!reader.ok())
+      return reader.status().WithContext("open Manifest SSTable reader");
+    if (reader.value()->file_size() != meta.file_size)
+      return Status::Corruption("manifest SSTable size does not match file");
 
-  auto actual_size = file.value()->Size();
-  if (!actual_size.ok())
-    return actual_size.status().WithContext("read Manifest SSTable size");
-  if (actual_size.value() != snapshot.live_table->file_size)
-    return Status::Corruption("manifest SSTable size does not match file");
+    auto properties = reader.value()->ValidateAndGetProperties();
+    if (!properties.ok())
+      return properties.status().WithContext("validate Manifest SSTable data");
+    if (!Matches(meta, properties.value()))
+      return Status::Corruption("manifest SSTable metadata does not match file");
+    opened.push_back(std::move(reader.value()));
+  }
 
-  auto reader = internal::SSTableReader::Open(std::move(file.value()));
-  if (!reader.ok())
-    return reader.status().WithContext("validate Manifest SSTable");
-
-  table_ = std::move(reader.value());
+  tables_.swap(opened);
   return Status::Ok();
 }
 
@@ -281,9 +293,9 @@ Status DB::Impl::Write(std::string_view key, std::string_view value,
     return Status::ResourceExhausted("memtable size accounting overflow");
   projected += added;
 
-  if (manifest_ && manifest_->current().live_table &&
+  if (manifest_ && !manifest_->current().live_tables.empty() &&
       projected >= options_.memtable_bytes)
-    return Status::NotSupported("V2 supports only one flushed SSTable");
+    return Status::NotSupported("the current writer supports only one flushed SSTable");
   if (next_sequence_ == std::numeric_limits<std::uint64_t>::max())
     return Status::ResourceExhausted("sequence space is exhausted");
 
@@ -315,8 +327,8 @@ Status DB::Impl::Write(std::string_view key, std::string_view value,
 
 Status DB::Impl::FlushMemTable() {
   const auto current = manifest_->current();
-  if (current.live_table)
-    return Status::NotSupported("V2 supports only one flushed SSTable");
+  if (!current.live_tables.empty())
+    return Status::NotSupported("the current writer supports only one flushed SSTable");
 
   const std::uint64_t table_number = current.next_file_number;
   if (table_number >= std::numeric_limits<std::uint64_t>::max() - 1)
@@ -347,6 +359,9 @@ Status DB::Impl::FlushMemTable() {
   auto verified = internal::SSTableReader::Open(std::move(verify_file.value()));
   if (!verified.ok())
     return verified.status().WithContext("validate temporary SSTable");
+  auto properties = verified.value()->ValidateAndGetProperties();
+  if (!properties.ok())
+    return properties.status().WithContext("validate temporary SSTable data");
 
   auto s = fs_->Rename(temp, final);
   if (!s.ok())
@@ -368,12 +383,16 @@ Status DB::Impl::FlushMemTable() {
   next.active_wal_number = wal_number;
   next.next_file_number = wal_number + 1;
   next.last_sequence = next_sequence_ - 1;
-  next.live_table = internal::TableMeta{table_number,
-                                        built.value().file_size,
-                                        built.value().smallest_key,
-                                        built.value().largest_key,
-                                        built.value().min_sequence,
-                                        built.value().max_sequence};
+  next.live_tables.push_back(
+      internal::TableMeta{table_number, built.value().file_size,
+                          built.value().smallest_key, built.value().largest_key,
+                          built.value().min_sequence, built.value().max_sequence});
+  if (!Matches(next.live_tables.front(), properties.value()))
+    return Status::Corruption("built SSTable metadata does not match file");
+
+  std::vector<std::unique_ptr<internal::SSTableReader>> next_tables;
+  next_tables.reserve(1);
+  next_tables.push_back(std::move(verified.value()));
 
   // This is the flush commit point. Before it succeeds, the old Manifest, WAL,
   // and MemTable remain authoritative even if orphan files were created.
@@ -392,7 +411,7 @@ Status DB::Impl::FlushMemTable() {
   // the newly published state must remain successful once committed.
   auto old_wal = std::move(wal_);
   wal_ = std::move(new_wal);
-  table_ = std::move(verified.value());
+  tables_.swap(next_tables);
   memtable_.Clear();
   if (old_wal)
     old_wal->Close().IgnoreError();
@@ -413,10 +432,21 @@ Result<std::string> DB::Impl::Get(std::string_view key) const {
   if (mem.status().code() != StatusCode::kNotFound)
     return mem.status();
 
-  if (table_) {
-    auto disk = table_->Get(key);
-    if (!disk.ok())
+  if (manifest_ && manifest_->current().live_tables.size() != tables_.size())
+    return Status::Corruption("Manifest and Reader table sets differ");
+
+  const internal::BytewiseLess less;
+  for (std::size_t i = tables_.size(); i > 0; --i) {
+    const auto& meta = manifest_->current().live_tables[i - 1];
+    if (less(key, meta.smallest_key) || less(meta.largest_key, key))
+      continue;
+    auto disk = tables_[i - 1]->Get(key);
+    if (!disk.ok()) {
+      if (disk.status().code() == StatusCode::kNotFound) {
+        continue;
+      }
       return disk.status();
+    }
     if (disk.value().type == internal::ValueType::kTombstone)
       return Status::NotFound("key was deleted");
     return disk.value().value;
@@ -429,21 +459,45 @@ Result<std::vector<Entry>> DB::Impl::Scan(std::string_view begin,
   auto s = CheckOpen();
   if (!s.ok())
     return s;
-  if (!end.empty() && begin > end)
+  const internal::BytewiseLess less;
+  if (!end.empty() && less(end, begin))
     return Status::InvalidArgument("scan begin is greater than end");
+  if (manifest_ && manifest_->current().live_tables.size() != tables_.size())
+    return Status::Corruption("Manifest and Reader table sets differ");
 
   std::map<std::string, internal::InternalEntry, internal::BytewiseLess> merged;
 
-  if (table_) {
-    auto disk = table_->Scan(begin, end);
+  const auto merge = [&](internal::InternalEntry entry) -> Status {
+    auto [it, inserted] = merged.try_emplace(entry.user_key, std::move(entry));
+    if (inserted)
+      return Status::Ok();
+    if (it->second.sequence == entry.sequence)
+      return Status::Corruption("duplicate key has the same sequence");
+    if (it->second.sequence < entry.sequence)
+      it->second = std::move(entry);
+    return Status::Ok();
+  };
+
+  for (std::size_t i = 0; i < tables_.size(); ++i) {
+    const auto& meta = manifest_->current().live_tables[i];
+    if ((!end.empty() && !less(meta.smallest_key, end)) ||
+        less(meta.largest_key, begin))
+      continue;
+    auto disk = tables_[i]->Scan(begin, end);
     if (!disk.ok())
       return disk.status();
-    for (auto& e : disk.value())
-      merged[e.user_key] = e;
+    for (auto& entry : disk.value()) {
+      auto merged_status = merge(std::move(entry));
+      if (!merged_status.ok())
+        return merged_status;
+    }
   }
 
-  for (auto& e : memtable_.Scan(begin, end))
-    merged[e.user_key] = e;
+  for (auto& entry : memtable_.Scan(begin, end)) {
+    auto merged_status = merge(std::move(entry));
+    if (!merged_status.ok())
+      return merged_status;
+  }
 
   std::vector<Entry> out;
   for (auto& [key, e] : merged)

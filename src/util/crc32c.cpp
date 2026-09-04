@@ -1,8 +1,8 @@
 #include "util/crc32c.h"
 
 namespace tinylsm::internal {
-std::uint32_t Crc32c(std::span<const std::byte> data) {
-  std::uint32_t crc = 0xffffffffU;
+namespace {
+std::uint32_t ExtendCrc32c(std::uint32_t crc, std::span<const std::byte> data) {
   for (const std::byte byte : data) {
     crc ^= std::to_integer<std::uint8_t>(byte);
     for (int bit = 0; bit < 8; ++bit) {
@@ -10,6 +10,18 @@ std::uint32_t Crc32c(std::span<const std::byte> data) {
       crc = (crc >> 1U) ^ (0x82f63b78U & mask);
     }
   }
+  return crc;
+}
+} // namespace
+
+std::uint32_t Crc32c(std::span<const std::byte> data) {
+  const auto crc = ExtendCrc32c(0xffffffffU, data);
+  return ~crc;
+}
+
+std::uint32_t Crc32c(std::span<const std::byte> first,
+                     std::span<const std::byte> second) {
+  const auto crc = ExtendCrc32c(ExtendCrc32c(0xffffffffU, first), second);
   return ~crc;
 }
 } // namespace tinylsm::internal

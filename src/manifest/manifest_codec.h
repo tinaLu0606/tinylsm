@@ -1,13 +1,17 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
-#include <optional>
 #include <span>
 #include <string>
+#include <vector>
 
 #include "tinylsm/result.h"
 
 namespace tinylsm::internal {
+
+inline constexpr std::size_t kManifestHeaderBytes = 16;
+inline constexpr std::size_t kMaxManifestFileBytes = 128U * 1024U * 1024U;
 
 struct TableMeta {
   std::uint64_t file_number = 0;
@@ -16,12 +20,16 @@ struct TableMeta {
   std::string largest_key;
   std::uint64_t min_sequence = 0;
   std::uint64_t max_sequence = 0;
+
+  bool operator==(const TableMeta&) const = default;
 };
 struct ManifestSnapshot {
   std::uint64_t active_wal_number = 0;
   std::uint64_t next_file_number = 1;
   std::uint64_t last_sequence = 0;
-  std::optional<TableMeta> live_table;
+  std::vector<TableMeta> live_tables;
+
+  bool operator==(const ManifestSnapshot&) const = default;
 };
 
 /// Converts a complete snapshot to or from TinyLSM framing around a Protobuf

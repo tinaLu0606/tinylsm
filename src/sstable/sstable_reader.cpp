@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <limits>
 
+#include "util/bytewise_less.h"
+
 namespace tinylsm::internal {
 Result<std::unique_ptr<SSTableReader>>
 SSTableReader::Open(std::unique_ptr<RandomAccessFile> file) {
@@ -40,7 +42,7 @@ SSTableReader::Open(std::unique_ptr<RandomAccessFile> file) {
     if (b.offset > b.offset + b.size || b.offset + b.size > footer.value().index_offset)
       return Status::Corruption("SSTable block range is invalid");
   return std::unique_ptr<SSTableReader>(
-      new SSTableReader(std::move(file), std::move(blocks.value())));
+      new SSTableReader(std::move(file), size.value(), std::move(blocks.value())));
 }
 Result<std::vector<InternalEntry>> SSTableReader::ReadBlock(const BlockMeta& m) const {
   if (m.size > std::numeric_limits<std::size_t>::max())
@@ -50,6 +52,46 @@ Result<std::vector<InternalEntry>> SSTableReader::ReadBlock(const BlockMeta& m) 
   if (!s.ok())
     return s;
   return DecodeDataBlock(bytes);
+}
+Result<SSTableProperties> SSTableReader::ValidateAndGetProperties() const {
+  if (blocks_.empty())
+    return Status::Corruption("SSTable contains no data blocks");
+
+  SSTableProperties properties;
+  properties.file_size = file_size_;
+  BytewiseLess less;
+  std::string previous_key;
+  bool has_entries = false;
+
+  for (const auto& block : blocks_) {
+    auto entries = ReadBlock(block);
+    if (!entries.ok())
+      return entries.status();
+    if (entries.value().empty())
+      return Status::Corruption("SSTable contains an empty data block");
+    if (entries.value().front().user_key != block.first_key ||
+        entries.value().back().user_key != block.last_key)
+      return Status::Corruption("SSTable index key range does not match data block");
+    if (has_entries && !less(previous_key, entries.value().front().user_key))
+      return Status::Corruption("SSTable data block keys are not strictly ordered");
+
+    for (const auto& entry : entries.value()) {
+      if (entry.sequence == 0)
+        return Status::Corruption("SSTable entry sequence is invalid");
+      if (!has_entries) {
+        properties.smallest_key = entry.user_key;
+        properties.min_sequence = entry.sequence;
+        properties.max_sequence = entry.sequence;
+        has_entries = true;
+      }
+      properties.largest_key = entry.user_key;
+      properties.min_sequence = std::min(properties.min_sequence, entry.sequence);
+      properties.max_sequence = std::max(properties.max_sequence, entry.sequence);
+    }
+    previous_key = entries.value().back().user_key;
+  }
+
+  return properties;
 }
 Result<InternalEntry> SSTableReader::Get(std::string_view key) const {
   auto it = std::lower_bound(

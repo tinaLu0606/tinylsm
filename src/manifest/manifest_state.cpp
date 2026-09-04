@@ -2,6 +2,7 @@
 
 #include <array>
 #include <stdexcept>
+#include <type_traits>
 #include <vector>
 
 #include "util/coding.h"
@@ -10,6 +11,7 @@ namespace tinylsm::internal {
 namespace {
 constexpr const char* kManifest = "MANIFEST";
 constexpr const char* kTemp = "MANIFEST.tmp";
+static_assert(std::is_nothrow_move_assignable_v<ManifestSnapshot>);
 } // namespace
 
 ManifestPublishOutcome ManifestPublishOutcome::NotPublished(Status status) {
@@ -37,7 +39,7 @@ Result<ManifestSnapshot> ManifestState::Load(FileSystem& fs,
   auto size = file.value()->Size();
   if (!size.ok())
     return size.status();
-  if (size.value() > 128U * 1024U * 1024U)
+  if (size.value() > kMaxManifestFileBytes)
     return Status::Corruption("manifest is too large");
 
   std::vector<std::byte> bytes(size.value());
@@ -46,7 +48,7 @@ Result<ManifestSnapshot> ManifestState::Load(FileSystem& fs,
     return s;
   return ManifestCodec::Decode(bytes);
 }
-ManifestPublishOutcome ManifestState::Publish(const ManifestSnapshot& next) {
+ManifestPublishOutcome ManifestState::Publish(ManifestSnapshot next) {
   auto encoded = ManifestCodec::Encode(next);
   if (!encoded.ok())
     return ManifestPublishOutcome::NotPublished(encoded.status());
@@ -72,7 +74,7 @@ ManifestPublishOutcome ManifestState::Publish(const ManifestSnapshot& next) {
   if (!s.ok())
     return ManifestPublishOutcome::VisibleNotDurable(std::move(s));
 
-  current_ = next;
+  current_ = std::move(next);
   return ManifestPublishOutcome::Durable();
 }
 } // namespace tinylsm::internal

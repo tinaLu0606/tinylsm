@@ -12,6 +12,8 @@
 namespace tinylsm::test {
 
 enum class FaultOperation {
+  kOpenRandomAccess,
+  kReadAt,
   kOpenWritable,
   kAppend,
   kSync,

@@ -40,7 +40,7 @@ tinylsm::internal::ManifestSnapshot NextSnapshot() {
   snapshot.active_wal_number = 3;
   snapshot.next_file_number = 4;
   snapshot.last_sequence = 7;
-  snapshot.live_table = tinylsm::internal::TableMeta{2, 100, "a", "z", 1, 7};
+  snapshot.live_tables.push_back(tinylsm::internal::TableMeta{2, 100, "a", "z", 1, 7});
   return snapshot;
 }
 
