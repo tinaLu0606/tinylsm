@@ -40,6 +40,7 @@ private:
   Result<internal::ManifestSnapshot> CreateInitialManifest();
   Status OpenManifestSSTables(const internal::ManifestSnapshot& snapshot);
   Status RecoverActiveWal(const internal::ManifestSnapshot& snapshot);
+  void CleanupObsoleteFiles() noexcept;
 
   /// Performs the WAL-first write path and may synchronously trigger a flush.
   /// A flush error can occur after the record was accepted earlier.
@@ -48,7 +49,9 @@ private:
   /// Appends one SSTable and publishes a replacement WAL. Manifest publication
   /// is the commit point; later in-memory switching and cleanup cannot fail the write.
   Status FlushMemTable();
-  void BestEffortRemove(const std::filesystem::path& path) noexcept;
+  bool BestEffortRemove(const std::filesystem::path& path) noexcept;
+  void RememberCleanup(const std::filesystem::path& path) noexcept;
+  void BestEffortSyncDir() noexcept;
   Status CheckOpen() const;
 
   Options options_;
@@ -62,6 +65,7 @@ private:
   /// Set when the authoritative on-disk Manifest is uncertain. Close remains
   /// available, but every data operation fails until the caller reopens the DB.
   std::optional<Status> terminal_error_;
+  std::vector<std::filesystem::path> pending_cleanup_;
   std::uint64_t next_sequence_ = 1;
   bool closed_ = false;
 };

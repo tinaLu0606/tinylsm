@@ -1,10 +1,23 @@
-find_package(GTest CONFIG REQUIRED)
+if(TINYLSM_FETCH_TEST_DEPS)
+  include(FetchContent)
+  FetchContent_Declare(
+    googletest
+    GIT_REPOSITORY https://github.com/google/googletest.git
+    GIT_TAG v1.17.0
+    GIT_SHALLOW TRUE
+  )
+  FetchContent_MakeAvailable(googletest)
+else()
+  find_package(GTest CONFIG REQUIRED)
+endif()
 include(GoogleTest)
 
 add_executable(tinylsm_tests
   unit/core_test.cpp
+  unit/filename_test.cpp
   unit/iterator_test.cpp
   integration/db_test.cpp
+  recovery/cleanup_recovery_test.cpp
   recovery/compaction_recovery_test.cpp
   recovery/flush_recovery_test.cpp
   test_support/fault_injection_fs.cpp

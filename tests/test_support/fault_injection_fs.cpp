@@ -134,7 +134,16 @@ public:
 
   Result<std::vector<std::filesystem::path>>
   ListDir(const std::filesystem::path& path) override {
-    return inner_->ListDir(path);
+    if (auto failure =
+            plan_->MaybeFail(FaultOperation::kListDir, path, FaultTiming::kBefore))
+      return *failure;
+    auto listed = inner_->ListDir(path);
+    if (!listed.ok())
+      return listed.status();
+    if (auto failure =
+            plan_->MaybeFail(FaultOperation::kListDir, path, FaultTiming::kAfter))
+      return *failure;
+    return std::move(listed.value());
   }
 
   Status Rename(const std::filesystem::path& from,

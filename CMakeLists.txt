@@ -12,7 +12,7 @@ option(TINYLSM_BUILD_TOOLS "Build TinyLSM command-line tools" ON)
 option(TINYLSM_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
 option(TINYLSM_ENABLE_ASAN "Enable AddressSanitizer" OFF)
 option(TINYLSM_ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer" OFF)
-option(TINYLSM_FETCH_TEST_DEPS "Fetch GoogleTest when unavailable" OFF)
+option(TINYLSM_FETCH_TEST_DEPS "Fetch and build the pinned GoogleTest" OFF)
 option(TINYLSM_FETCH_PROTOBUF "Fetch pinned Protobuf when unavailable" ON)
 
 include(CompilerWarnings)

@@ -168,6 +168,8 @@ and are not thread-safe; callers must synchronize shared access externally.
 - A versioned Manifest snapshot that records the authoritative WAL, ordered
   SSTable set, and sequence state while retaining version-1 read compatibility.
 - Startup recovery through Manifest loading and active-WAL replay.
+- Conservative orphan cleanup for canonical numbered WAL/SSTable names after
+  successful recovery and at later maintenance checkpoints.
 - Detection of malformed records, truncated data, checksum failures, invalid
   ordering, missing files, and size mismatches.
 - Unit, integration, CLI, fault-injection, and recovery tests, plus ASan/UBSan
@@ -286,6 +288,16 @@ A failure before Manifest publication leaves the old table set authoritative.
 If the Manifest rename is visible but its directory sync fails, the current DB
 handle rejects further data operations until it is closed and reopened.
 
+### Orphan cleanup
+
+Numbered files use canonical decimal names: numbers below one million are padded
+to six digits, while larger numbers grow naturally. After complete recovery,
+TinyLSM removes canonical `.wal`, `.sst`, `.sst.tmp`, and `MANIFEST.tmp` files
+that are not referenced by the current Manifest. Noncanonical lookalikes and
+unrelated files are always preserved. Listing, removal, or directory-sync
+failures do not invalidate recovered data; later Open, flush, or compaction
+attempts retry cleanup.
+
 Before the Manifest rename, the old Manifest, WAL, and MemTable remain
 authoritative even if the attempted flush created orphan files. A successful
 Manifest rename makes the replacement visible; syncing the database directory
@@ -304,6 +316,7 @@ Open database
     -> require WAL sequences to increase beyond the published sequence
     -> truncate an incomplete WAL tail when recoverable
     -> continue from the highest recovered sequence number
+    -> remove only canonical files not referenced by the recovered Manifest
 ```
 
 Checksums detect accidental corruption in encoded WAL records, SSTable blocks,

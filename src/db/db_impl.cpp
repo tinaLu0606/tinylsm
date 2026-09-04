@@ -1,10 +1,9 @@
 #include "db/db_impl.h"
 
 #include <algorithm>
-#include <iomanip>
 #include <limits>
-#include <sstream>
 
+#include "db/filename.h"
 #include "iterator/internal_iterator.h"
 #include "sstable/sstable_builder.h"
 #include "util/bytewise_less.h"
@@ -12,19 +11,6 @@
 
 namespace tinylsm {
 namespace {
-std::string Numbered(std::uint64_t n, std::string_view suffix) {
-  std::ostringstream out;
-  out << std::setw(6) << std::setfill('0') << n << suffix;
-  return out.str();
-}
-std::string WalName(std::uint64_t n) { return Numbered(n, ".wal"); }
-std::string SstName(std::uint64_t n) { return Numbered(n, ".sst"); }
-bool IsNumberedFile(std::string_view name, std::string_view suffix) {
-  if (name.size() != 6 + suffix.size() || !name.ends_with(suffix))
-    return false;
-  return std::all_of(name.begin(), name.begin() + 6,
-                     [](char c) { return c >= '0' && c <= '9'; });
-}
 internal::DecodeLimits Limits(const Options& o) {
   return {o.max_key_bytes, o.max_value_bytes};
 }
@@ -84,6 +70,8 @@ DB::Impl::Open(const std::filesystem::path& path, Options options,
   if (!s.ok())
     return s;
 
+  impl->CleanupObsoleteFiles();
+
   return impl;
 }
 
@@ -121,14 +109,16 @@ Result<bool> DB::Impl::InspectInitialFiles() {
       has_manifest_temp = true;
       continue;
     }
-    if (IsNumberedFile(name, ".wal")) {
-      if (name != WalName(1))
+    const auto numbered = internal::ParseNumberedFileName(name);
+    if (numbered && numbered->type == internal::NumberedFileType::kWal) {
+      if (numbered->number != 1)
         return Status::Corruption(
             "database without MANIFEST contains an unexpected WAL");
       has_initial_wal = true;
       continue;
     }
-    if (IsNumberedFile(name, ".sst") || IsNumberedFile(name, ".sst.tmp")) {
+    if (numbered && (numbered->type == internal::NumberedFileType::kSstable ||
+                     numbered->type == internal::NumberedFileType::kSstableTemp)) {
       return Status::Corruption("database without MANIFEST contains an SSTable");
     }
   }
@@ -140,7 +130,7 @@ Result<bool> DB::Impl::InspectInitialFiles() {
     return false;
   }
 
-  auto wal = fs_->OpenRandomAccess(*path_ / WalName(1));
+  auto wal = fs_->OpenRandomAccess(*path_ / internal::WalFileName(1));
   if (!wal.ok())
     return wal.status().WithContext("inspect pre-Manifest WAL");
   auto size = wal.value()->Size();
@@ -165,7 +155,8 @@ Result<internal::ManifestSnapshot> DB::Impl::CreateInitialManifest() {
   snapshot.active_wal_number = 1;
   snapshot.next_file_number = 2;
 
-  auto initial = fs_->OpenWritable(*path_ / WalName(1), inspected.value());
+  auto initial =
+      fs_->OpenWritable(*path_ / internal::WalFileName(1), inspected.value());
   if (!initial.ok())
     return initial.status().WithContext("create initial WAL");
 
@@ -195,7 +186,7 @@ Status DB::Impl::OpenManifestSSTables(const internal::ManifestSnapshot& snapshot
   opened.reserve(snapshot.live_tables.size());
 
   for (const auto& meta : snapshot.live_tables) {
-    const auto sst_path = *path_ / SstName(meta.file_number);
+    const auto sst_path = *path_ / internal::SstableFileName(meta.file_number);
     auto table_exists = fs_->FileExists(sst_path);
     if (!table_exists.ok())
       return table_exists.status().WithContext("inspect Manifest SSTable");
@@ -224,7 +215,7 @@ Status DB::Impl::OpenManifestSSTables(const internal::ManifestSnapshot& snapshot
 }
 
 Status DB::Impl::RecoverActiveWal(const internal::ManifestSnapshot& snapshot) {
-  const auto wal_path = *path_ / WalName(snapshot.active_wal_number);
+  const auto wal_path = *path_ / internal::WalFileName(snapshot.active_wal_number);
   auto wal_exists = fs_->FileExists(wal_path);
   if (!wal_exists.ok())
     return wal_exists.status().WithContext("inspect active WAL");
@@ -325,13 +316,15 @@ Status DB::Impl::FlushMemTable() {
   if (current.live_tables.size() != tables_.size())
     return Status::Corruption("Manifest and Reader table sets differ");
 
+  CleanupObsoleteFiles();
+
   const std::uint64_t table_number = current.next_file_number;
   if (table_number >= std::numeric_limits<std::uint64_t>::max() - 1)
     return Status::ResourceExhausted("file number space is exhausted");
   const std::uint64_t wal_number = table_number + 1;
 
-  const auto temp = *path_ / (SstName(table_number) + ".tmp"),
-             final = *path_ / SstName(table_number);
+  const auto temp = *path_ / internal::SstableTempFileName(table_number),
+             final = *path_ / internal::SstableFileName(table_number);
   auto file = fs_->OpenWritable(temp, false);
   if (!file.ok())
     return file.status().WithContext("create temporary SSTable");
@@ -365,7 +358,8 @@ Status DB::Impl::FlushMemTable() {
   if (!s.ok())
     return s.WithContext("sync database directory after SSTable rename");
 
-  auto new_wal_file = fs_->OpenWritable(*path_ / WalName(wal_number), false);
+  auto new_wal_file =
+      fs_->OpenWritable(*path_ / internal::WalFileName(wal_number), false);
   if (!new_wal_file.ok())
     return new_wal_file.status().WithContext("create replacement WAL");
   s = new_wal_file.value()->Sync();
@@ -410,7 +404,8 @@ Status DB::Impl::FlushMemTable() {
   memtable_.Clear();
   if (old_wal)
     old_wal->Close().IgnoreError();
-  BestEffortRemove(*path_ / WalName(old_wal_number));
+  if (BestEffortRemove(*path_ / internal::WalFileName(old_wal_number)))
+    BestEffortSyncDir();
   return Status::Ok();
 }
 
@@ -505,13 +500,15 @@ Status DB::Impl::Compact() {
   const auto& current = manifest_->current();
   if (current.live_tables.size() != tables_.size())
     return Status::Corruption("Manifest and Reader table sets differ");
+
+  CleanupObsoleteFiles();
   if (tables_.empty())
     return Status::Ok();
 
   std::vector<std::filesystem::path> old_table_paths;
   old_table_paths.reserve(current.live_tables.size());
   for (const auto& table : current.live_tables)
-    old_table_paths.push_back(*path_ / SstName(table.file_number));
+    old_table_paths.push_back(*path_ / internal::SstableFileName(table.file_number));
 
   std::vector<std::unique_ptr<internal::InternalIterator>> inputs;
   inputs.reserve(tables_.size());
@@ -526,8 +523,8 @@ Status DB::Impl::Compact() {
     return merged.status().WithContext("create compaction merge iterator");
 
   const std::uint64_t replacement_number = current.next_file_number;
-  const auto temp = *path_ / (SstName(replacement_number) + ".tmp");
-  const auto final = *path_ / SstName(replacement_number);
+  const auto temp = *path_ / internal::SstableTempFileName(replacement_number);
+  const auto final = *path_ / internal::SstableFileName(replacement_number);
   std::unique_ptr<internal::SSTableBuilder> builder;
 
   while (merged.value()->Valid()) {
@@ -615,17 +612,92 @@ Status DB::Impl::Compact() {
   // closing old readers and removing their files are best-effort cleanup.
   tables_.swap(replacement_tables);
   replacement_tables.clear();
+  bool removed_any = false;
   for (const auto& old_table : old_table_paths)
-    BestEffortRemove(old_table);
+    removed_any = BestEffortRemove(old_table) || removed_any;
+  if (removed_any)
+    BestEffortSyncDir();
   return Status::Ok();
 }
 
-void DB::Impl::BestEffortRemove(const std::filesystem::path& path) noexcept {
+bool DB::Impl::BestEffortRemove(const std::filesystem::path& path) noexcept {
   try {
-    fs_->Remove(path).IgnoreError();
+    auto status = fs_->Remove(path);
+    if (status.ok())
+      return true;
   } catch (...) {
-    // Cleanup is never allowed to turn a durably committed operation into an
-    // apparent failure. A later Open/cleanup pass can retry the orphan.
+    RememberCleanup(path);
+    return false;
+  }
+
+  RememberCleanup(path);
+  return false;
+}
+
+void DB::Impl::RememberCleanup(const std::filesystem::path& path) noexcept {
+  try {
+    if (std::find(pending_cleanup_.begin(), pending_cleanup_.end(), path) ==
+        pending_cleanup_.end()) {
+      pending_cleanup_.push_back(path);
+    }
+  } catch (...) {
+    return;
+  }
+}
+
+void DB::Impl::BestEffortSyncDir() noexcept {
+  try {
+    fs_->SyncDir(*path_).IgnoreError();
+  } catch (...) {
+    return;
+  }
+}
+
+void DB::Impl::CleanupObsoleteFiles() noexcept {
+  try {
+    bool removed_any = false;
+    auto pending = std::move(pending_cleanup_);
+    pending_cleanup_.clear();
+    for (const auto& path : pending)
+      removed_any = BestEffortRemove(path) || removed_any;
+
+    auto listed = fs_->ListDir(*path_);
+    if (!listed.ok()) {
+      if (removed_any)
+        BestEffortSyncDir();
+      return;
+    }
+
+    const auto& current = manifest_->current();
+    for (const auto& path : listed.value()) {
+      const auto name = path.filename().string();
+      bool obsolete = name == "MANIFEST.tmp";
+      if (const auto numbered = internal::ParseNumberedFileName(name)) {
+        switch (numbered->type) {
+        case internal::NumberedFileType::kWal:
+          obsolete = numbered->number != current.active_wal_number;
+          break;
+        case internal::NumberedFileType::kSstable:
+          obsolete =
+              std::none_of(current.live_tables.begin(), current.live_tables.end(),
+                           [&](const internal::TableMeta& table) {
+                             return table.file_number == numbered->number;
+                           });
+          break;
+        case internal::NumberedFileType::kSstableTemp:
+          obsolete = true;
+          break;
+        }
+      }
+
+      if (obsolete)
+        removed_any = BestEffortRemove(path) || removed_any;
+    }
+
+    if (removed_any)
+      BestEffortSyncDir();
+  } catch (...) {
+    // Cleanup cannot invalidate successfully recovered or committed state.
     return;
   }
 }

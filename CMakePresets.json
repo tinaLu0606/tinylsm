@@ -31,7 +31,8 @@
       "inherits": "dev-debug",
       "cacheVariables": {
         "TINYLSM_ENABLE_ASAN": true,
-        "TINYLSM_ENABLE_UBSAN": true
+        "TINYLSM_ENABLE_UBSAN": true,
+        "TINYLSM_FETCH_TEST_DEPS": true
       }
     },
     {
