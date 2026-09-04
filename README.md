@@ -9,7 +9,8 @@ The project is intentionally small enough to inspect end to end. It is a
 learning-oriented prototype rather than a production database. The current
 write path supports repeated synchronous flushes into an ordered set of
 SSTables, range scans lazily merge those tables, and callers can explicitly run
-synchronous full compaction. Concurrent access is not implemented.
+synchronous full compaction. The V3 storage lifecycle is complete; concurrent
+access is not implemented.
 
 ## Quick start
 
@@ -18,7 +19,8 @@ synchronous full compaction. Concurrent access is not implemented.
 - CMake 3.24 or newer
 - Ninja
 - A C++20 compiler
-- GoogleTest for test builds
+- GoogleTest for normal test builds; the sanitizer preset fetches a pinned
+  source copy so the test framework receives the same instrumentation
 - Protobuf (if it is not installed, CMake fetches the pinned v29.3 source)
 - Node.js and npm when developing the optional Lab UI
 

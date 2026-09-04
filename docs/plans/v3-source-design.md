@@ -3,10 +3,10 @@
 ## 状态
 
 - 最近更新：2026-09-04
-- 状态：`实施中（前五阶段已完成）`
+- 状态：`已完成`
 - 定位：分阶段实现与验收依据
 
-前五阶段已完成 Manifest 双版本、多表读取基础、Open metadata 校验、重复 flush、active WAL sequence 恢复校验、内部 iterator/多路归并 Scan、同步 full compaction，以及共享 filename/orphan cleanup；当前仅剩跨模块最终回归与文档收口。
+V3 已完成 Manifest 双版本、多表读取与重复 flush、内部 iterator/多路归并 Scan、同步 full compaction、共享 filename/orphan cleanup，以及跨模块故障矩阵和全部构建门禁。
 
 V3 把原路线中的多 SSTable、同步 compaction，以及 Scan 所需的内部归并 iterator 合并为一个阶段。
 
@@ -453,7 +453,7 @@ Manifest visible 但目录 sync 失败
 3. **已完成（2026-09-04）**：按第 4 节合同实现 MemTable/SSTable iterator、多路归并和完整 Scan；已覆盖同 key 去重、范围边界、sticky error，以及后续 block 失败时不返回部分结果；
 4. **已完成（2026-09-04）**：实现同步 `DB::Compact()`；提交前准备好 replacement Reader、Manifest metadata、旧表路径和 vector 容量，提交后只做不抛异常的 swap/move 与 best-effort cleanup；已覆盖零表、一表、全 tombstone、MemTable/WAL 保持不变和各提交阶段失败；
 5. **已完成（2026-09-04）**：实现共享 filename parser 与 `CleanupObsoleteFiles()`，扩展 `ListDir` 故障注入能力；已覆盖规范化 round-trip、零值/溢出/近似名称拒绝、误删保护、`ListDir`/`Remove`/`SyncDir` 失败、当前进程及重启重试和文件编号边界；
-6. 运行跨模块故障矩阵和 V0-V2 全量回归，更新 README，再执行全部构建、格式、lint 和 sanitizer 验证。
+6. **已完成（2026-09-04）**：补齐 commit 后旧 WAL 关闭异常和多轮维护目录收敛测试，V0-V2 回归保留在全套测试中；README、计划与 devlog 已收口；Debug、Release、ASan+UBSan 均为 `78/78`，format、lint 和 `git diff --check` 通过。
 
 ## 9. 验收重点
 
@@ -502,7 +502,7 @@ ctest --test-dir build/release --output-on-failure
 git diff --check
 ```
 
-V3 完成后，再安排 install/package，并重新讨论并发、自动 compaction 和缓存等后续方向。
+后续版本再安排 install/package，并重新讨论并发、自动 compaction 和缓存等方向。
 
 ## 10. Orphan 安全清理计划
 
