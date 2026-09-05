@@ -11,7 +11,19 @@ target_compile_features(tinylsm_cli PRIVATE cxx_std_20)
 tinylsm_set_warnings(tinylsm_cli)
 tinylsm_enable_sanitizers(tinylsm_cli)
 
-add_library(tinylsm_lab_core STATIC lab/lab_session.cpp)
+# Internal-only fault injection support is shared by recovery tests and Lab
+# recovery plumbing. It is deliberately not linked into tinylsm::tinylsm.
+add_library(tinylsm_lab_fault_support STATIC
+  ${PROJECT_SOURCE_DIR}/tests/test_support/fault_injection_fs.cpp
+)
+target_include_directories(tinylsm_lab_fault_support PUBLIC ${PROJECT_SOURCE_DIR}/tests
+                                                    PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(tinylsm_lab_fault_support PUBLIC tinylsm::tinylsm)
+target_compile_features(tinylsm_lab_fault_support PUBLIC cxx_std_20)
+tinylsm_set_warnings(tinylsm_lab_fault_support)
+tinylsm_enable_sanitizers(tinylsm_lab_fault_support)
+
+add_library(tinylsm_lab_core STATIC lab/lab_session.cpp lab/storage_inspector.cpp)
 target_include_directories(tinylsm_lab_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
                                               PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_link_libraries(tinylsm_lab_core PUBLIC tinylsm::tinylsm)
@@ -19,10 +31,19 @@ target_compile_features(tinylsm_lab_core PUBLIC cxx_std_20)
 tinylsm_set_warnings(tinylsm_lab_core)
 tinylsm_enable_sanitizers(tinylsm_lab_core)
 
+add_library(tinylsm_lab_recovery STATIC lab/recovery_lab.cpp)
+target_include_directories(tinylsm_lab_recovery PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
+                                                  PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_link_libraries(tinylsm_lab_recovery PUBLIC tinylsm_lab_core
+                                           PRIVATE tinylsm_lab_fault_support)
+target_compile_features(tinylsm_lab_recovery PUBLIC cxx_std_20)
+tinylsm_set_warnings(tinylsm_lab_recovery)
+tinylsm_enable_sanitizers(tinylsm_lab_recovery)
+
 add_library(tinylsm_lab_http STATIC lab/lab_http_server.cpp)
 target_include_directories(tinylsm_lab_http PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}
                                               PRIVATE ${PROJECT_SOURCE_DIR}/src)
-target_link_libraries(tinylsm_lab_http PUBLIC tinylsm_lab_core httplib::httplib
+target_link_libraries(tinylsm_lab_http PUBLIC tinylsm_lab_recovery httplib::httplib
                                         nlohmann_json::nlohmann_json)
 target_compile_features(tinylsm_lab_http PUBLIC cxx_std_20)
 tinylsm_set_warnings(tinylsm_lab_http)
@@ -33,3 +54,9 @@ target_link_libraries(tinylsm_lab_server PRIVATE tinylsm_lab_http)
 target_compile_features(tinylsm_lab_server PRIVATE cxx_std_20)
 tinylsm_set_warnings(tinylsm_lab_server)
 tinylsm_enable_sanitizers(tinylsm_lab_server)
+
+add_executable(tinylsm_lab_worker lab/tinylsm_lab_worker.cpp)
+target_link_libraries(tinylsm_lab_worker PRIVATE tinylsm::tinylsm)
+target_compile_features(tinylsm_lab_worker PRIVATE cxx_std_20)
+tinylsm_set_warnings(tinylsm_lab_worker)
+tinylsm_enable_sanitizers(tinylsm_lab_worker)

@@ -43,7 +43,9 @@ int main(int argc, char** argv) {
   }
 
   tinylsm::lab::LabSession session;
-  tinylsm::lab::LabHttpServer server(session, static_directory);
+  const auto worker_path =
+      std::filesystem::absolute(argv[0]).parent_path() / "tinylsm_lab_worker";
+  tinylsm::lab::LabHttpServer server(session, static_directory, worker_path);
   std::cout << "TinyLSM Lab server listening on http://127.0.0.1:" << port << '\n';
   return server.Listen("127.0.0.1", port) ? 0 : 1;
 }

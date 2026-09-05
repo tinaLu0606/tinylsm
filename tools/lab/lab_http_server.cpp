@@ -17,6 +17,7 @@
 #include <nlohmann/json.hpp>
 
 #include "lab/lab_session.h"
+#include "lab/recovery_lab.h"
 
 namespace tinylsm::lab {
 namespace {
@@ -184,6 +185,33 @@ Json ValueJson(const ValueEntry& value) {
           {"valueBase64", Base64Encode(value.value)}};
 }
 
+Json InspectedEntryJson(const InspectedEntry& value) {
+  return {{"key", DisplayBytes(value.key)},
+          {"value", value.tombstone ? "" : DisplayBytes(value.value)},
+          {"keyBase64", Base64Encode(value.key)},
+          {"valueBase64", Base64Encode(value.value)},
+          {"sequence", value.sequence},
+          {"type", value.tombstone ? "tombstone" : "value"}};
+}
+
+std::optional<std::uint64_t>
+UnsignedQuery(const Request& request, std::string_view name, std::uint64_t fallback) {
+  if (!request.has_param(std::string(name)))
+    return fallback;
+  const auto value = request.get_param_value(std::string(name));
+  std::uint64_t out = 0;
+  const auto [end, error] =
+      std::from_chars(value.data(), value.data() + value.size(), out);
+  if (error != std::errc{} || end != value.data() + value.size())
+    return std::nullopt;
+  return out;
+}
+
+Json ValidationJson(const std::optional<Status>& error) {
+  return error ? Json{{"crc", "invalid"}, {"error", StatusJson(*error)}}
+               : Json{{"crc", "ok"}};
+}
+
 Json OptionsJson(const Options& options) {
   return {{"memtableBytes", options.memtable_bytes},
           {"createIfMissing", options.create_if_missing},
@@ -283,8 +311,8 @@ Json StateJson(const State& state) {
            {"features",
             {{"compact", true},
              {"storageInspection", true},
-             {"resourceMetrics", false},
-             {"recoveryExperiments", false}}}};
+             {"resourceMetrics", true},
+             {"recoveryExperiments", true}}}};
   if (state.opened_at)
     out["openedAt"] = *state.opened_at;
   if (state.terminal_error)
@@ -336,6 +364,22 @@ Json EventJson(const Event& event) {
 }
 
 Json MetricsJson(const Metrics& metrics) {
+  Json points = Json::array();
+  for (const auto& point : metrics.points) {
+    points.push_back({{"timestamp", point.timestamp},
+                      {"operationsPerSecond", point.operations_per_second},
+                      {"p50Micros", point.p50_micros},
+                      {"p95Micros", point.p95_micros},
+                      {"p99Micros", point.p99_micros},
+                      {"rssBytes", point.rss_bytes},
+                      {"cpuPercent", point.cpu_percent},
+                      {"directoryBytes", point.directory_bytes},
+                      {"manifestBytes", point.manifest_bytes},
+                      {"walBytes", point.wal_bytes},
+                      {"sstableBytes", point.sstable_bytes},
+                      {"temporaryBytes", point.temporary_bytes},
+                      {"memtableBytes", point.memtable_bytes}});
+  }
   return {{"source", "live"},
           {"measuredAt", ToIso8601(std::chrono::system_clock::now())},
           {"operationCounts",
@@ -353,8 +397,124 @@ Json MetricsJson(const Metrics& metrics) {
            metrics.compact_count == 0
                ? 0
                : metrics.total_compact_micros / metrics.compact_count},
-          {"points", Json::array()},
-          {"processMetricsAvailable", false}};
+          {"points", std::move(points)},
+          {"processMetricsAvailable", true}};
+}
+
+const char* WorkloadStatusName(WorkloadStatus status) {
+  switch (status) {
+  case WorkloadStatus::kIdle:
+    return "idle";
+  case WorkloadStatus::kRunning:
+    return "running";
+  case WorkloadStatus::kPaused:
+    return "paused";
+  case WorkloadStatus::kCompleted:
+    return "completed";
+  case WorkloadStatus::kCancelled:
+    return "cancelled";
+  case WorkloadStatus::kFailed:
+    return "failed";
+  }
+  return "failed";
+}
+
+Json WorkloadJson(const WorkloadRun& run) {
+  const char* distribution =
+      run.config.distribution == WorkloadDistribution::kSequential ? "sequential"
+      : run.config.distribution == WorkloadDistribution::kHotspot  ? "hotspot"
+                                                                   : "uniform";
+  Json out{{"id", run.id},
+           {"status", WorkloadStatusName(run.status)},
+           {"config",
+            {{"operationCount", run.config.operation_count},
+             {"seed", run.config.seed},
+             {"keySpace", run.config.key_space},
+             {"valueBytes", run.config.value_bytes},
+             {"putRatio", run.config.put_ratio},
+             {"getRatio", run.config.get_ratio},
+             {"deleteRatio", run.config.delete_ratio},
+             {"operationsPerSecond", run.config.operations_per_second},
+             {"distribution", distribution},
+             {"reopenEvery", run.config.reopen_every}}},
+           {"completedOperations", run.completed_operations},
+           {"performanceMode", run.performance_mode}};
+  if (run.started_at)
+    out["startedAt"] = *run.started_at;
+  if (run.finished_at)
+    out["finishedAt"] = *run.finished_at;
+  if (run.mismatch)
+    out["mismatch"] = {{"operation", run.mismatch->operation},
+                       {"key", run.mismatch->key},
+                       {"expected", run.mismatch->expected},
+                       {"actual", run.mismatch->actual}};
+  return out;
+}
+
+Result<WorkloadConfig> ParseWorkload(const Json& json) {
+  try {
+    WorkloadConfig out;
+    out.operation_count = json.at("operationCount").get<std::uint64_t>();
+    out.seed = json.at("seed").get<std::uint64_t>();
+    out.key_space = json.at("keySpace").get<std::uint64_t>();
+    out.value_bytes = json.at("valueBytes").get<std::size_t>();
+    out.put_ratio = json.at("putRatio").get<std::uint32_t>();
+    out.get_ratio = json.at("getRatio").get<std::uint32_t>();
+    out.delete_ratio = json.at("deleteRatio").get<std::uint32_t>();
+    out.operations_per_second = json.at("operationsPerSecond").get<std::uint32_t>();
+    out.reopen_every = json.at("reopenEvery").get<std::uint64_t>();
+    const auto distribution = json.at("distribution").get<std::string>();
+    if (distribution == "sequential")
+      out.distribution = WorkloadDistribution::kSequential;
+    else if (distribution == "uniform")
+      out.distribution = WorkloadDistribution::kUniform;
+    else if (distribution == "hotspot")
+      out.distribution = WorkloadDistribution::kHotspot;
+    else
+      return Status::InvalidArgument("unknown workload distribution");
+    return out;
+  } catch (const std::exception& error) {
+    return Status::InvalidArgument(std::string("invalid workload config: ") +
+                                   error.what());
+  }
+}
+
+Json RecoveryScenarioJson(const RecoveryScenario& scenario) {
+  return {{"id", RecoveryScenarioName(scenario.id)},
+          {"name", scenario.name},
+          {"description", scenario.description},
+          {"expectedOutcome", scenario.expected_outcome},
+          {"mutation", scenario.mutation},
+          {"available", true}};
+}
+
+Json RecoveryRunJson(const RecoveryRun& run) {
+  Json events = Json::array();
+  for (const auto& event : run.events)
+    events.push_back(EventJson(event));
+  Json out{{"id", run.id},
+           {"scenarioId", RecoveryScenarioName(run.scenario_id)},
+           {"status", RecoveryRunStatusName(run.status)},
+           {"sandboxPath", run.sandbox_path.string()},
+           {"expectedOutcome", run.expected_outcome},
+           {"createdAt", run.created_at},
+           {"events", std::move(events)}};
+  if (run.actual_outcome)
+    out["actualOutcome"] = *run.actual_outcome;
+  return out;
+}
+
+Result<RecoveryScenarioId> ParseRecoveryScenario(const Json& json) {
+  try {
+    const auto scenario =
+        ParseRecoveryScenarioId(json.at("scenarioId").get<std::string>());
+    if (!scenario)
+      return Status::InvalidArgument("unknown recovery scenario");
+    return *scenario;
+  } catch (const std::exception& error) {
+    return Status::InvalidArgument(std::string("invalid recovery preview: ") +
+                                   error.what());
+  }
 }
 
 std::optional<std::uint64_t> EventCursor(const Request& request) {
@@ -389,8 +549,11 @@ void HandleOperation(LabSession& session, OperationKind kind, const Request& req
 } // namespace
 
 LabHttpServer::LabHttpServer(LabSession& session,
-                             std::filesystem::path static_directory)
+                             std::filesystem::path static_directory,
+                             std::filesystem::path worker_path)
     : session_(session), static_directory_(std::move(static_directory)),
+      worker_path_(std::move(worker_path)),
+      recovery_(std::make_unique<RecoveryLab>(session_, worker_path_)),
       server_(std::make_unique<httplib::Server>()) {
   server_->set_payload_max_length(kMaxRequestBytes);
   server_->set_exception_handler(
@@ -494,14 +657,276 @@ LabHttpServer::LabHttpServer(LabSession& session,
                         {"totalBytes", total},
                         {"hasMore", false}});
   });
+  server_->Get("/api/storage/manifest", [this](const Request&, Response& response) {
+    const auto manifest = session_.InspectManifest();
+    if (!manifest.ok()) {
+      SendStatusError(response, manifest.status(), 422, "storage.manifest");
+      return;
+    }
+    const auto state = session_.GetState();
+    Json tables = Json::array();
+    for (const auto& table : state.tables) {
+      std::ostringstream name;
+      name << std::setw(6) << std::setfill('0') << table.file_number << ".sst";
+      tables.push_back({{"fileNumber", table.file_number},
+                        {"name", name.str()},
+                        {"fileSize", table.file_size},
+                        {"smallestKey", DisplayBytes(table.smallest_key)},
+                        {"largestKey", DisplayBytes(table.largest_key)},
+                        {"minSequence", table.min_sequence},
+                        {"maxSequence", table.max_sequence}});
+    }
+    SendJson(response, {{"formatVersion", manifest.value().format_version},
+                        {"activeWal", manifest.value().active_wal},
+                        {"nextFileNumber", manifest.value().next_file_number},
+                        {"lastSequence", manifest.value().last_sequence},
+                        {"crc", "ok"},
+                        {"tables", std::move(tables)}});
+  });
+  server_->Get(R"(/api/storage/wal/([^/]+)/records)", [this](const Request& request,
+                                                             Response& response) {
+    const auto cursor = UnsignedQuery(request, "cursor", 0);
+    const auto limit = UnsignedQuery(request, "limit", 20);
+    if (!cursor || !limit || *limit > StorageInspector::kMaxPageItems) {
+      SendStatusError(response, Status::InvalidArgument("invalid WAL page"), 400,
+                      "storage.wal");
+      return;
+    }
+    const auto page = session_.InspectWal(request.matches[1].str(), *cursor, *limit);
+    if (!page.ok()) {
+      SendStatusError(response, page.status(), 422, "storage.wal");
+      return;
+    }
+    Json records = Json::array();
+    for (const auto& record : page.value().items) {
+      Json item{{"offset", record.offset},
+                {"encodedBytes", record.encoded_bytes},
+                {"sequence", 0},
+                {"type", "value"},
+                {"key", ""},
+                {"value", ""}};
+      if (record.entry) {
+        item["sequence"] = record.entry->sequence;
+        item["type"] = record.entry->tombstone ? "tombstone" : "value";
+        item["key"] = DisplayBytes(record.entry->key);
+        item["value"] = DisplayBytes(record.entry->value);
+      }
+      const Json validation = ValidationJson(record.validation_error);
+      for (const auto& [key, value] : validation.items())
+        item[key] = std::move(value);
+      records.push_back(std::move(item));
+    }
+    Json out{{"records", std::move(records)}, {"hasMore", page.value().has_more}};
+    if (page.value().next_cursor)
+      out["cursor"] = *page.value().next_cursor;
+    SendJson(response, out);
+  });
+  server_->Get(R"(/api/storage/sst/([^/]+)/blocks)", [this](const Request& request,
+                                                            Response& response) {
+    const auto cursor = UnsignedQuery(request, "cursor", 0);
+    const auto limit = UnsignedQuery(request, "limit", 20);
+    if (!cursor || !limit || *limit > StorageInspector::kMaxPageItems) {
+      SendStatusError(response, Status::InvalidArgument("invalid SSTable page"), 400,
+                      "storage.sstable");
+      return;
+    }
+    const auto page =
+        session_.InspectSstable(request.matches[1].str(), *cursor, *limit);
+    if (!page.ok()) {
+      SendStatusError(response, page.status(), 422, "storage.sstable");
+      return;
+    }
+    Json blocks = Json::array();
+    for (const auto& block : page.value().items) {
+      Json entries = Json::array();
+      for (const auto& entry : block.entries)
+        entries.push_back(InspectedEntryJson(entry));
+      Json item{{"index", block.index},
+                {"offset", block.offset},
+                {"size", block.size},
+                {"smallestKey", DisplayBytes(block.smallest_key)},
+                {"largestKey", DisplayBytes(block.largest_key)},
+                {"entries", std::move(entries)}};
+      const Json validation = ValidationJson(block.validation_error);
+      for (const auto& [key, value] : validation.items())
+        item[key] = std::move(value);
+      blocks.push_back(std::move(item));
+    }
+    Json out{{"blocks", std::move(blocks)}, {"hasMore", page.value().has_more}};
+    if (page.value().next_cursor)
+      out["cursor"] = *page.value().next_cursor;
+    SendJson(response, out);
+  });
+  server_->Get(R"(/api/storage/file/([^/]+)/bytes)", [this](const Request& request,
+                                                            Response& response) {
+    const auto offset = UnsignedQuery(request, "offset", 0);
+    const auto length = UnsignedQuery(request, "length", 0);
+    if (!offset || !length || *length > StorageInspector::kMaxRangeBytes) {
+      SendStatusError(response, Status::InvalidArgument("invalid file byte range"), 400,
+                      "storage.bytes");
+      return;
+    }
+    const auto bytes = session_.InspectFileBytes(request.matches[1].str(), *offset,
+                                                 static_cast<std::size_t>(*length));
+    if (!bytes.ok()) {
+      SendStatusError(response, bytes.status(), 422, "storage.bytes");
+      return;
+    }
+    SendJson(response, {{"offset", *offset},
+                        {"length", bytes.value().size()},
+                        {"base64", Base64Encode(bytes.value())}});
+  });
   server_->Get("/api/metrics", [this](const Request&, Response& response) {
     SendJson(response, MetricsJson(session_.GetMetrics()));
   });
-  server_->Get("/api/events", [this](const Request&, Response& response) {
+  server_->Post("/api/workloads", [this](const Request& request, Response& response) {
+    const auto body = ParseBody(request, response);
+    if (!body)
+      return;
+    const auto config = ParseWorkload(*body);
+    if (!config.ok()) {
+      SendStatusError(response, config.status(), 400, "workload.start");
+      return;
+    }
+    const auto run = session_.StartWorkload(config.value());
+    if (!run.ok()) {
+      SendStatusError(response, run.status(), 422, "workload.start");
+      return;
+    }
+    SendJson(response, WorkloadJson(run.value()));
+  });
+  server_->Get("/api/workloads/current", [this](const Request&, Response& response) {
+    SendJson(response, WorkloadJson(session_.GetWorkload()));
+  });
+  server_->Post(R"(/api/workloads/([^/]+)/pause)", [this](const Request& request,
+                                                          Response& response) {
+    if (request.matches[1].str() != session_.GetWorkload().id) {
+      SendStatusError(response, Status::InvalidArgument("unknown workload id"), 404,
+                      "workload.pause");
+      return;
+    }
+    const auto run = session_.PauseWorkload();
+    if (!run.ok()) {
+      SendStatusError(response, run.status(), 422, "workload.pause");
+      return;
+    }
+    SendJson(response, WorkloadJson(run.value()));
+  });
+  server_->Post(R"(/api/workloads/([^/]+)/resume)", [this](const Request& request,
+                                                           Response& response) {
+    if (request.matches[1].str() != session_.GetWorkload().id) {
+      SendStatusError(response, Status::InvalidArgument("unknown workload id"), 404,
+                      "workload.resume");
+      return;
+    }
+    const auto run = session_.ResumeWorkload();
+    if (!run.ok()) {
+      SendStatusError(response, run.status(), 422, "workload.resume");
+      return;
+    }
+    SendJson(response, WorkloadJson(run.value()));
+  });
+  server_->Post(R"(/api/workloads/([^/]+)/cancel)", [this](const Request& request,
+                                                           Response& response) {
+    if (request.matches[1].str() != session_.GetWorkload().id) {
+      SendStatusError(response, Status::InvalidArgument("unknown workload id"), 404,
+                      "workload.cancel");
+      return;
+    }
+    const auto run = session_.CancelWorkload();
+    if (!run.ok()) {
+      SendStatusError(response, run.status(), 422, "workload.cancel");
+      return;
+    }
+    SendJson(response, WorkloadJson(run.value()));
+  });
+  server_->Get("/api/recovery/scenarios", [this](const Request&, Response& response) {
+    Json scenarios = Json::array();
+    for (const auto& scenario : recovery_->Scenarios())
+      scenarios.push_back(RecoveryScenarioJson(scenario));
+    SendJson(response, scenarios);
+  });
+  server_->Post(
+      "/api/recovery/experiments", [this](const Request& request, Response& response) {
+        const auto body = ParseBody(request, response);
+        if (!body)
+          return;
+        const auto scenario = ParseRecoveryScenario(*body);
+        if (!scenario.ok()) {
+          SendStatusError(response, scenario.status(), 400, "recovery.preview");
+          return;
+        }
+        const auto run = recovery_->Preview(scenario.value());
+        if (!run.ok()) {
+          SendStatusError(response, run.status(), 422, "recovery.preview");
+          return;
+        }
+        SendJson(response, RecoveryRunJson(run.value()));
+      });
+  server_->Get("/api/recovery/experiments", [this](const Request&, Response& response) {
+    Json runs = Json::array();
+    for (const auto& run : recovery_->Runs())
+      runs.push_back(RecoveryRunJson(run));
+    SendJson(response, runs);
+  });
+  server_->Get(R"(/api/recovery/experiments/([^/]+))",
+               [this](const Request& request, Response& response) {
+                 const auto run = recovery_->Get(request.matches[1].str());
+                 if (!run.ok()) {
+                   SendStatusError(response, run.status(), 404, "recovery.get");
+                   return;
+                 }
+                 SendJson(response, RecoveryRunJson(run.value()));
+               });
+  server_->Post(R"(/api/recovery/experiments/([^/]+)/run)",
+                [this](const Request& request, Response& response) {
+                  const auto run = recovery_->Run(request.matches[1].str());
+                  if (!run.ok()) {
+                    SendStatusError(response, run.status(), 422, "recovery.run");
+                    return;
+                  }
+                  SendJson(response, RecoveryRunJson(run.value()));
+                });
+  server_->Post("/api/recovery/reset", [this](const Request&, Response& response) {
+    const auto runs = recovery_->Reset();
+    if (!runs.ok()) {
+      SendStatusError(response, runs.status(), 422, "recovery.reset");
+      return;
+    }
+    SendJson(response, Json::array());
+  });
+  server_->Get("/api/events", [this](const Request& request, Response& response) {
+    const auto limit = UnsignedQuery(request, "limit", 200);
+    if (!limit || *limit == 0 || *limit > LabSession::kMaxEvents) {
+      SendStatusError(response, Status::InvalidArgument("invalid event page limit"),
+                      400, "events.page");
+      return;
+    }
+    std::optional<std::uint64_t> before;
+    if (request.has_param("before")) {
+      before = UnsignedQuery(request, "before", 0);
+      if (!before) {
+        SendStatusError(response, Status::InvalidArgument("invalid event page cursor"),
+                        400, "events.page");
+        return;
+      }
+    }
     Json events = Json::array();
-    for (const auto& event : session_.GetEvents())
+    const auto all = session_.GetEvents();
+    bool has_more = false;
+    for (const auto& event : all) {
+      if (before && event.id >= *before)
+        continue;
+      if (events.size() == *limit) {
+        has_more = true;
+        break;
+      }
       events.push_back(EventJson(event));
-    SendJson(response, events);
+    }
+    Json out{{"events", std::move(events)}, {"hasMore", has_more}};
+    if (has_more && !out["events"].empty())
+      out["cursor"] = out["events"].back().at("id");
+    SendJson(response, out);
   });
   server_->Get(
       "/api/events/stream", [this](const Request& request, Response& response) {

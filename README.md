@@ -78,28 +78,26 @@ can be represented without escaping or encoding ambiguity. Command-line
 arguments themselves remain subject to shell limitations; binary applications
 should use the C++ API.
 
-## Lab UI prototype
+## TinyLSM Lab
 
 The experimental React and TypeScript frontend is maintained as the
-`tools/lab_web` Git submodule. Initialize it and start the Vite development
-server with:
+`tools/lab_web` Git submodule. A fresh checkout can build and start the local
+Lab with one command:
 
 ```sh
 git submodule update --init tools/lab_web
-cd tools/lab_web
-npm ci
-npm run dev
+./run lab
 ```
 
-The frontend provides Playground, Storage Explorer, Timeline, Workload,
-Recovery, and Report workspaces through a typed `LabApi`. It keeps the
-deterministic `MockLabApi` for offline UI work, and adds `HttpLabApi` for a
-real local session. Start the C++ server on loopback, then run Vite with the
-live transport selected:
+Then open the URL printed by the server (by default
+`http://127.0.0.1:8080`). `./run lab` installs the frontend dependencies when
+needed, builds the frontend with the live transport selected, builds the C++
+server, and serves the packaged UI and API from that one loopback process.
+Pass server options after `--`, for example `./run lab -- --port 18080`.
+
+For frontend-only work, start Vite separately:
 
 ```sh
-./run build
-./build/dev-debug/tools/tinylsm_lab_server --static-dir tools/lab_web/dist
 cd tools/lab_web
 VITE_LAB_API=live npm run dev
 ```
@@ -107,19 +105,27 @@ VITE_LAB_API=live npm run dev
 `tinylsm_lab_server` links TinyLSM directly; it never shells out to the CLI.
 It accepts Open, Close, Reopen, Put, Get, Delete, Scan and Compact on one
 serialized session, exposes copied internal diagnostic snapshots, lists real
-directory files, retains the latest 10,000 operation/event records, and serves
-SSE events with `Last-Event-ID` replay. It only listens on `127.0.0.1` (or
-`::1` when embedded) and limits JSON request bodies to 8 MiB. `cpp-httplib`
-v0.18.0 and `nlohmann/json` v3.11.3 are pinned through CMake FetchContent for
-this local tool.
+directory files, retains the latest 10,000 detailed operation/event records,
+and serves SSE events with `Last-Event-ID` replay. Storage inspection reads
+Manifest, WAL records, SSTable blocks, and hexadecimal file ranges through
+bounded, paged APIs. The server also records bounded latency/resource series,
+rotates detailed session event logs as JSONL, and runs deterministic seeded
+workloads against a server-side ordered reference map. High-rate workloads keep
+only aggregates and a first failure sample; they do not persist every operation.
+The Recovery workspace first copies the currently open database into a
+server-created temporary sandbox. Its three scenarios exercise a no-`Close()`
+worker exit, a one-byte WAL-tail truncation, and Manifest CRC corruption. Only
+the sandbox is mutated; preview, run, reset, and audit events are all exposed
+by the API. Recovery paths are never accepted from the browser.
+It only listens on `127.0.0.1` (or `::1` when embedded) and limits JSON request
+bodies to 8 MiB. `cpp-httplib` v0.18.0 and `nlohmann/json` v3.11.3 are pinned
+through CMake FetchContent for this local tool.
 
 Pass `--static-dir tools/lab_web/dist` after `npm run build` to have the same
 server also serve the packaged frontend; Vite remains useful for live frontend
 development.
 
-Live data is labelled `Live`; it is never filled from Mock fixtures. Paged
-format decoding, resource sampling, deterministic workloads and destructive
-recovery experiments remain unavailable until Goals 3 and 4. See
+Live data is labelled `Live`; it is never filled from Mock fixtures. See
 `tools/lab_web/README.md` for the frontend transport boundary and verification
 steps.
 
@@ -131,6 +137,7 @@ steps.
 | `./run build [preset]` | Configure and compile the selected preset |
 | `./run test [preset]` | Configure, compile, and run CTest |
 | `./run cli -- <args>` | Build and run `tinylsm_cli` |
+| `./run lab [-- <server args>]` | Build the live Lab UI and serve it with the loopback Lab API |
 | `./run format [--check]` | Apply or verify `clang-format` |
 | `./run lint [preset]` | Run `clang-tidy` with the preset compilation database |
 | `./run asan` | Build and test with AddressSanitizer and UBSan |

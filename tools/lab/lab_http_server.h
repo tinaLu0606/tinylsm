@@ -11,12 +11,14 @@ class Server;
 namespace tinylsm::lab {
 
 class LabSession;
+class RecoveryLab;
 
 /// Loopback-only HTTP adapter around a serialized LabSession.
 class LabHttpServer {
 public:
   explicit LabHttpServer(LabSession& session,
-                         std::filesystem::path static_directory = {});
+                         std::filesystem::path static_directory = {},
+                         std::filesystem::path worker_path = {});
   ~LabHttpServer();
 
   LabHttpServer(const LabHttpServer&) = delete;
@@ -30,6 +32,8 @@ public:
 private:
   LabSession& session_;
   std::filesystem::path static_directory_;
+  std::filesystem::path worker_path_;
+  std::unique_ptr<RecoveryLab> recovery_;
   std::unique_ptr<httplib::Server> server_;
 };
 

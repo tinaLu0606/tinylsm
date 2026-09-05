@@ -20,7 +20,6 @@ add_executable(tinylsm_tests
   recovery/cleanup_recovery_test.cpp
   recovery/compaction_recovery_test.cpp
   recovery/flush_recovery_test.cpp
-  test_support/fault_injection_fs.cpp
   test_support/temp_dir.cpp
 )
 target_link_libraries(tinylsm_tests PRIVATE GTest::gtest_main)
@@ -35,6 +34,12 @@ endif()
 if(TARGET tinylsm_lab_http)
   target_sources(tinylsm_tests PRIVATE integration/lab_server_test.cpp)
   target_link_libraries(tinylsm_tests PRIVATE tinylsm_lab_http)
+  add_dependencies(tinylsm_tests tinylsm_lab_worker)
+  target_compile_definitions(tinylsm_tests PRIVATE
+    TINYLSM_LAB_WORKER_PATH="$<TARGET_FILE:tinylsm_lab_worker>"
+  )
+else()
+  target_sources(tinylsm_tests PRIVATE test_support/fault_injection_fs.cpp)
 endif()
 
 target_include_directories(tinylsm_tests PRIVATE

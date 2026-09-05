@@ -14,6 +14,7 @@ Commands:
   build [preset]       Configure and build the project
   test [preset]        Configure, build, and run CTest
   cli [-- args...]     Build and run tinylsm_cli
+  lab [-- args...]     Build the Lab UI and serve it with the local API
   format [--check]     Format sources or verify formatting
   lint [preset]        Run clang-tidy using the preset compilation database
   asan                 Build and test with ASan + UBSan
@@ -53,6 +54,27 @@ run_cli() {
   run_command "${executable}" "$@"
 }
 
+run_lab() {
+  require_command npm
+  local ui_dir="${TINYLSM_ROOT}/tools/lab_web"
+  if [[ ! -f "${ui_dir}/package.json" ]]; then
+    die "Lab UI submodule is unavailable; run git submodule update --init tools/lab_web"
+  fi
+  if [[ ! -d "${ui_dir}/node_modules" ]]; then
+    run_command npm --prefix "${ui_dir}" ci
+  fi
+  run_command env VITE_LAB_API=live npm --prefix "${ui_dir}" run build
+  build dev-debug
+  local executable="${TINYLSM_ROOT}/build/dev-debug/tools/tinylsm_lab_server"
+  if [[ ! -x "${executable}" ]]; then
+    die "tinylsm_lab_server is unavailable after the Lab build"
+  fi
+  if [[ "${1:-}" == "--" ]]; then
+    shift
+  fi
+  run_command "${executable}" --static-dir "${ui_dir}/dist" "$@"
+}
+
 main() {
   require_command cmake
 
@@ -73,6 +95,9 @@ main() {
       ;;
     cli)
       run_cli "$@"
+      ;;
+    lab)
+      run_lab "$@"
       ;;
     format)
       run_command "${TINYLSM_ROOT}/scripts/format.sh" "$@"
