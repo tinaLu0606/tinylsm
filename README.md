@@ -78,7 +78,7 @@ can be represented without escaping or encoding ambiguity. Command-line
 arguments themselves remain subject to shell limitations; binary applications
 should use the C++ API.
 
-## Lab UI scaffold
+## Lab UI prototype
 
 The experimental React and TypeScript frontend is maintained as the
 `tools/lab_web` Git submodule. Initialize it and start the Vite development
@@ -87,13 +87,21 @@ server with:
 ```sh
 git submodule update --init tools/lab_web
 cd tools/lab_web
-npm install
+npm ci
 npm run dev
 ```
 
-The current frontend is a standalone interface scaffold. It proxies `/api`
-requests to `http://127.0.0.1:8080`; the C++ lab server and diagnostic API are
-not implemented yet.
+The frontend currently provides Playground, Storage Explorer, Timeline,
+Workload, Recovery, and Report workspaces through a typed `LabApi`. Its
+deterministic `MockLabApi` demonstrates state transitions, bounded logs,
+resource charts, report persistence, and responsive layouts. All simulated
+values are explicitly labelled `Mock`; process metrics and live fault injection
+are marked unavailable.
+
+The C++ lab server and diagnostic API are not implemented yet. A later HTTP
+adapter will use the existing `/api` proxy to `http://127.0.0.1:8080`; the
+current frontend never presents mock output as engine evidence. See
+`tools/lab_web/README.md` for the frontend architecture and verification steps.
 
 ## Developer commands
 
