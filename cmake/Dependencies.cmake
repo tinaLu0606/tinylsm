@@ -1,5 +1,26 @@
 include_guard(GLOBAL)
 
+# The Lab server uses cpp-httplib v0.18.0 (small header-oriented loopback HTTP
+# server with SSE-compatible responses) and nlohmann/json v3.11.3 (strict JSON
+# parsing/serialization). Keeping both FetchContent tags exact makes the local
+# diagnostic tool reproducible without adding either to TinyLSM's public API.
+if(TINYLSM_BUILD_TOOLS)
+  include(FetchContent)
+  FetchContent_Declare(
+    cpp_httplib
+    GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+    GIT_TAG v0.18.0
+    GIT_SHALLOW TRUE
+  )
+  FetchContent_Declare(
+    nlohmann_json
+    GIT_REPOSITORY https://github.com/nlohmann/json.git
+    GIT_TAG v3.11.3
+    GIT_SHALLOW TRUE
+  )
+  FetchContent_MakeAvailable(cpp_httplib nlohmann_json)
+endif()
+
 find_package(Protobuf CONFIG QUIET)
 
 if(NOT Protobuf_FOUND)

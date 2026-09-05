@@ -91,17 +91,37 @@ npm ci
 npm run dev
 ```
 
-The frontend currently provides Playground, Storage Explorer, Timeline,
-Workload, Recovery, and Report workspaces through a typed `LabApi`. Its
-deterministic `MockLabApi` demonstrates state transitions, bounded logs,
-resource charts, report persistence, and responsive layouts. All simulated
-values are explicitly labelled `Mock`; process metrics and live fault injection
-are marked unavailable.
+The frontend provides Playground, Storage Explorer, Timeline, Workload,
+Recovery, and Report workspaces through a typed `LabApi`. It keeps the
+deterministic `MockLabApi` for offline UI work, and adds `HttpLabApi` for a
+real local session. Start the C++ server on loopback, then run Vite with the
+live transport selected:
 
-The C++ lab server and diagnostic API are not implemented yet. A later HTTP
-adapter will use the existing `/api` proxy to `http://127.0.0.1:8080`; the
-current frontend never presents mock output as engine evidence. See
-`tools/lab_web/README.md` for the frontend architecture and verification steps.
+```sh
+./run build
+./build/dev-debug/tools/tinylsm_lab_server --static-dir tools/lab_web/dist
+cd tools/lab_web
+VITE_LAB_API=live npm run dev
+```
+
+`tinylsm_lab_server` links TinyLSM directly; it never shells out to the CLI.
+It accepts Open, Close, Reopen, Put, Get, Delete, Scan and Compact on one
+serialized session, exposes copied internal diagnostic snapshots, lists real
+directory files, retains the latest 10,000 operation/event records, and serves
+SSE events with `Last-Event-ID` replay. It only listens on `127.0.0.1` (or
+`::1` when embedded) and limits JSON request bodies to 8 MiB. `cpp-httplib`
+v0.18.0 and `nlohmann/json` v3.11.3 are pinned through CMake FetchContent for
+this local tool.
+
+Pass `--static-dir tools/lab_web/dist` after `npm run build` to have the same
+server also serve the packaged frontend; Vite remains useful for live frontend
+development.
+
+Live data is labelled `Live`; it is never filled from Mock fixtures. Paged
+format decoding, resource sampling, deterministic workloads and destructive
+recovery experiments remain unavailable until Goals 3 and 4. See
+`tools/lab_web/README.md` for the frontend transport boundary and verification
+steps.
 
 ## Developer commands
 

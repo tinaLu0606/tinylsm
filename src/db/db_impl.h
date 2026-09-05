@@ -32,6 +32,8 @@ public:
   ~Impl();
 
 private:
+  friend class internal::DBLabPeer;
+
   Impl() = default;
 
   Status EnsureDatabaseDirectory();

@@ -14,7 +14,8 @@ namespace tinylsm {
 
 namespace internal {
 class DBTestPeer;
-}
+class DBLabPeer;
+} // namespace internal
 
 /// A movable, non-copyable key-value database handle.
 ///
@@ -87,6 +88,7 @@ public:
 
 private:
   friend class internal::DBTestPeer;
+  friend class internal::DBLabPeer;
   class Impl;
   explicit DB(std::unique_ptr<Impl> impl);
   std::unique_ptr<Impl> impl_;

@@ -3,7 +3,7 @@
 ## 状态
 
 - 最近更新：2026-09-05
-- 状态：`Goal 1 已完成；Goal 2–4 待实现`
+- 状态：`Goal 1–2 已完成；Goal 3–4 待实现`
 - 定位：本地、单用户的 TinyLSM 测试与可观测实验台
 - 代码边界：前端位于 `tools/lab_web` 子模块；C++ 后端、引擎诊断接口和测试支持位于 TinyLSM 主仓库
 
@@ -252,6 +252,14 @@ npm run build
 从浏览器完成 Open -> Put -> Get -> Scan -> Close -> Reopen
 界面与后端 state/log 一致，无 Mock 数据混入 Live session
 ```
+
+已于 2026-09-05 完成：`tinylsm_lab_server` 直接链接 `tinylsm`，通过内部
+`DBLabPeer` 提供拷贝诊断快照，并由单一 `LabSession` 串行化 DB 操作。
+`HttpLabApi` 以 Base64 传输二进制请求，使用 SSE 的 `Last-Event-ID` 回放
+有界事件 buffer；Live 页面不复用 Mock 结果。已验证 `./run format --check`、
+`./run test`（80/80）、前端 9/9 tests、两种前端 build，以及浏览器的
+Open → Put → Get → Scan → Close → Reopen → Scan 流程，console 无 error。
+存储深度解码、进程资源采样、workload 与 recovery 仍分别属于 Goal 3/4。
 
 **Goal prompt**：
 

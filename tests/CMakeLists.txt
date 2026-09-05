@@ -32,9 +32,15 @@ else()
   target_link_libraries(tinylsm_tests PRIVATE tinylsm::tinylsm)
 endif()
 
+if(TARGET tinylsm_lab_http)
+  target_sources(tinylsm_tests PRIVATE integration/lab_server_test.cpp)
+  target_link_libraries(tinylsm_tests PRIVATE tinylsm_lab_http)
+endif()
+
 target_include_directories(tinylsm_tests PRIVATE
   ${PROJECT_SOURCE_DIR}/src
   ${PROJECT_SOURCE_DIR}/tests
+  ${PROJECT_SOURCE_DIR}/tools
 )
 target_compile_features(tinylsm_tests PRIVATE cxx_std_20)
 tinylsm_set_warnings(tinylsm_tests)
