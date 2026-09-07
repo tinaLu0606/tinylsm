@@ -9,8 +9,9 @@ The project is intentionally small enough to inspect end to end. It is a
 learning-oriented prototype rather than a production database. The current
 write path supports atomic write batches and repeated synchronous flushes into
 an ordered set of SSTables, range scans lazily merge those tables, and callers
-can explicitly run synchronous full compaction. Public operations on one DB
-handle are serialized internally so the handle can be shared by callers.
+can explicitly run synchronous full compaction. `Get`, `Scan`, and diagnostic
+snapshots share a read lock; writes, compaction, and close take the exclusive
+lock, so a long Scan can delay a writer.
 
 ## Quick start
 
@@ -399,10 +400,13 @@ TinyLSM currently favors clarity and testability over feature breadth:
 
 - Compaction is explicit, synchronous, and full-table only; there is no
   automatic trigger, background worker, or multi-level layout.
-- There is no Bloom filter or block cache.
+- There is no Bloom filter. SSTable decoded blocks have an in-memory bounded
+  LRU cache (8 MiB by default; `Options::block_cache_bytes = 0` disables it).
+  The cache is not persistent and only stores successfully validated blocks.
 - Flushes are synchronous; there is no immutable-MemTable/background worker.
-- DB operations use one global mutex; there is no parallel read path, group
-  commit, snapshot, or general multi-record transaction/rollback facility.
+- There is no group commit, snapshot isolation, or general multi-record
+  transaction/rollback facility. Read operations can run concurrently, but a
+  Scan holds a shared lock while materializing its result.
 - The POSIX filesystem path is the implemented persistent backend.
 - Packaging and installation rules are not implemented yet.
 
@@ -414,6 +418,11 @@ formats visible while leaving clear next steps toward a fuller LSM engine.
 The reproducible Release workloads, raw JSON output, macOS pre/post comparison,
 same-machine Linux/LevelDB results, and fixed Lima VM definition are documented in
 [`docs/performance/baseline-2026-09-06.md`](docs/performance/baseline-2026-09-06.md).
+The follow-up work is split into independently verifiable Codex goals in
+[`docs/plans/performance-extension-roadmap.md`](docs/plans/performance-extension-roadmap.md).
+Goal 1's fixed-Linux profile, raw before/after JSON, cache accounting, and
+concurrency result are in
+[`docs/performance/read-path-2026-09-07.md`](docs/performance/read-path-2026-09-07.md).
 The baseline is descriptive and is not yet a CI performance gate.
 The completed Linux run passed 97/97 tests in Debug, ASan/UBSan, and Clang TSan,
 plus the Release build and deployment smoke test. Recreate it with
