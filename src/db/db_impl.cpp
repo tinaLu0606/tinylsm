@@ -1,6 +1,7 @@
 #include "db/db_impl.h"
 
 #include <algorithm>
+#include <chrono>
 #include <limits>
 
 #include "db/filename.h"
@@ -21,6 +22,25 @@ bool Matches(const internal::TableMeta& meta,
          meta.largest_key == properties.largest_key &&
          meta.min_sequence == properties.min_sequence &&
          meta.max_sequence == properties.max_sequence;
+}
+using LockClock = std::chrono::steady_clock;
+
+void RecordReadLockWait(const std::shared_ptr<internal::ReadMetricsState>& metrics,
+                        LockClock::time_point started) {
+  metrics->read_lock_acquisitions.fetch_add(1, std::memory_order_relaxed);
+  metrics->read_lock_wait_nanoseconds.fetch_add(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(LockClock::now() - started)
+          .count(),
+      std::memory_order_relaxed);
+}
+
+void RecordWriteLockWait(const std::shared_ptr<internal::ReadMetricsState>& metrics,
+                         LockClock::time_point started) {
+  metrics->write_lock_acquisitions.fetch_add(1, std::memory_order_relaxed);
+  metrics->write_lock_wait_nanoseconds.fetch_add(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(LockClock::now() - started)
+          .count(),
+      std::memory_order_relaxed);
 }
 } // namespace
 
@@ -43,6 +63,9 @@ DB::Impl::Open(const std::filesystem::path& path, Options options,
   impl->options_ = options;
   impl->path_ = path;
   impl->fs_ = std::move(fs);
+  impl->read_metrics_ = std::make_shared<internal::ReadMetricsState>();
+  impl->block_cache_ = std::make_shared<internal::BlockCache>(options.block_cache_bytes,
+                                                              impl->read_metrics_);
 
   auto s = impl->EnsureDatabaseDirectory();
   if (!s.ok())
@@ -196,7 +219,8 @@ Status DB::Impl::OpenManifestSSTables(const internal::ManifestSnapshot& snapshot
     auto file = fs_->OpenRandomAccess(sst_path);
     if (!file.ok())
       return file.status().WithContext("open Manifest SSTable");
-    auto reader = internal::SSTableReader::Open(std::move(file.value()));
+    auto reader = internal::SSTableReader::Open(
+        std::move(file.value()), meta.file_number, block_cache_, read_metrics_);
     if (!reader.ok())
       return reader.status().WithContext("open Manifest SSTable reader");
     if (reader.value()->file_size() != meta.file_size)
@@ -259,11 +283,15 @@ Status DB::Impl::CheckOpen() const {
   return terminal_error_.value_or(Status::Ok());
 }
 Status DB::Impl::Put(std::string_view k, std::string_view v) {
-  std::scoped_lock lock(mutex_);
+  const auto lock_started = LockClock::now();
+  std::unique_lock lock(mutex_);
+  RecordWriteLockWait(read_metrics_, lock_started);
   return WriteEntry(k, v, internal::ValueType::kValue);
 }
 Status DB::Impl::Delete(std::string_view k) {
-  std::scoped_lock lock(mutex_);
+  const auto lock_started = LockClock::now();
+  std::unique_lock lock(mutex_);
+  RecordWriteLockWait(read_metrics_, lock_started);
   return WriteEntry(k, {}, internal::ValueType::kTombstone);
 }
 Status DB::Impl::WriteEntry(std::string_view key, std::string_view value,
@@ -314,7 +342,9 @@ Status DB::Impl::WriteEntry(std::string_view key, std::string_view value,
 }
 
 Status DB::Impl::Write(const WriteBatch& batch) {
-  std::scoped_lock lock(mutex_);
+  const auto lock_started = LockClock::now();
+  std::unique_lock lock(mutex_);
+  RecordWriteLockWait(read_metrics_, lock_started);
   auto open = CheckOpen();
   if (!open.ok())
     return open;
@@ -402,7 +432,8 @@ Status DB::Impl::FlushMemTable() {
   auto verify_file = fs_->OpenRandomAccess(temp);
   if (!verify_file.ok())
     return verify_file.status().WithContext("open temporary SSTable for validation");
-  auto verified = internal::SSTableReader::Open(std::move(verify_file.value()));
+  auto verified = internal::SSTableReader::Open(
+      std::move(verify_file.value()), table_number, block_cache_, read_metrics_);
   if (!verified.ok())
     return verified.status().WithContext("validate temporary SSTable");
   auto properties = verified.value()->ValidateAndGetProperties();
@@ -469,7 +500,9 @@ Status DB::Impl::FlushMemTable() {
 }
 
 Result<std::string> DB::Impl::Get(std::string_view key) const {
-  std::scoped_lock lock(mutex_);
+  const auto lock_started = LockClock::now();
+  std::shared_lock lock(mutex_);
+  RecordReadLockWait(read_metrics_, lock_started);
   auto s = CheckOpen();
   if (!s.ok())
     return s;
@@ -506,7 +539,9 @@ Result<std::string> DB::Impl::Get(std::string_view key) const {
 }
 Result<std::vector<Entry>> DB::Impl::Scan(std::string_view begin,
                                           std::string_view end) const {
-  std::scoped_lock lock(mutex_);
+  const auto lock_started = LockClock::now();
+  std::shared_lock lock(mutex_);
+  RecordReadLockWait(read_metrics_, lock_started);
   auto s = CheckOpen();
   if (!s.ok())
     return s;
@@ -553,8 +588,14 @@ Result<std::vector<Entry>> DB::Impl::Scan(std::string_view begin,
   return out;
 }
 
+ReadMetrics DB::Impl::GetReadMetrics() const noexcept {
+  return read_metrics_ ? read_metrics_->Snapshot() : ReadMetrics{};
+}
+
 Status DB::Impl::Compact() {
-  std::scoped_lock lock(mutex_);
+  const auto lock_started = LockClock::now();
+  std::unique_lock lock(mutex_);
+  RecordWriteLockWait(read_metrics_, lock_started);
   auto open = CheckOpen();
   if (!open.ok())
     return open;
@@ -568,9 +609,13 @@ Status DB::Impl::Compact() {
     return Status::Ok();
 
   std::vector<std::filesystem::path> old_table_paths;
+  std::vector<std::uint64_t> old_table_numbers;
   old_table_paths.reserve(current.live_tables.size());
-  for (const auto& table : current.live_tables)
+  old_table_numbers.reserve(current.live_tables.size());
+  for (const auto& table : current.live_tables) {
     old_table_paths.push_back(*path_ / internal::SstableFileName(table.file_number));
+    old_table_numbers.push_back(table.file_number);
+  }
 
   std::vector<std::unique_ptr<internal::InternalIterator>> inputs;
   inputs.reserve(tables_.size());
@@ -628,7 +673,9 @@ Status DB::Impl::Compact() {
     if (!verify_file.ok())
       return verify_file.status().WithContext(
           "open temporary compacted SSTable for validation");
-    auto verified = internal::SSTableReader::Open(std::move(verify_file.value()));
+    auto verified =
+        internal::SSTableReader::Open(std::move(verify_file.value()),
+                                      replacement_number, block_cache_, read_metrics_);
     if (!verified.ok())
       return verified.status().WithContext("validate temporary compacted SSTable");
     auto properties = verified.value()->ValidateAndGetProperties();
@@ -674,6 +721,8 @@ Status DB::Impl::Compact() {
   // closing old readers and removing their files are best-effort cleanup.
   tables_.swap(replacement_tables);
   replacement_tables.clear();
+  for (const auto old_table_number : old_table_numbers)
+    block_cache_->EraseTable(old_table_number);
   bool removed_any = false;
   for (const auto& old_table : old_table_paths)
     removed_any = BestEffortRemove(old_table) || removed_any;
@@ -775,7 +824,9 @@ void DB::Impl::CleanupObsoleteFiles() noexcept {
 }
 
 Status DB::Impl::Close() {
-  std::scoped_lock lock(mutex_);
+  const auto lock_started = LockClock::now();
+  std::unique_lock lock(mutex_);
+  RecordWriteLockWait(read_metrics_, lock_started);
   if (closed_)
     return Status::AlreadyClosed("database is closed");
 

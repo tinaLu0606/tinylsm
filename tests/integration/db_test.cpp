@@ -2,11 +2,14 @@
 
 #include <algorithm>
 #include <barrier>
+#include <chrono>
+#include <condition_variable>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -30,6 +33,115 @@ namespace {
 using tinylsm::test::FaultOperation;
 using tinylsm::test::FaultTiming;
 using tinylsm::test::TempDir;
+
+class ReadGate {
+public:
+  void Arm() {
+    std::scoped_lock lock(mutex_);
+    armed_ = true;
+  }
+
+  void WaitAtRead() {
+    std::unique_lock lock(mutex_);
+    if (!armed_)
+      return;
+    ++arrived_;
+    if (arrived_ == 2)
+      cv_.notify_all();
+    cv_.wait(lock, [&] { return released_; });
+  }
+
+  bool WaitForTwo() {
+    std::unique_lock lock(mutex_);
+    return cv_.wait_for(lock, std::chrono::seconds(2), [&] { return arrived_ >= 2; });
+  }
+
+  void Release() {
+    std::scoped_lock lock(mutex_);
+    released_ = true;
+    cv_.notify_all();
+  }
+
+private:
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  bool armed_ = false;
+  bool released_ = false;
+  std::size_t arrived_ = 0;
+};
+
+class GateRandomAccessFile final : public tinylsm::internal::RandomAccessFile {
+public:
+  GateRandomAccessFile(std::unique_ptr<tinylsm::internal::RandomAccessFile> inner,
+                       std::shared_ptr<ReadGate> gate)
+      : inner_(std::move(inner)), gate_(std::move(gate)) {}
+
+  tinylsm::Result<std::size_t> ReadAt(std::uint64_t offset,
+                                      std::span<std::byte> buffer) const override {
+    gate_->WaitAtRead();
+    return inner_->ReadAt(offset, buffer);
+  }
+
+  tinylsm::Result<std::uint64_t> Size() const override { return inner_->Size(); }
+
+private:
+  std::unique_ptr<tinylsm::internal::RandomAccessFile> inner_;
+  std::shared_ptr<ReadGate> gate_;
+};
+
+class GateFileSystem final : public tinylsm::internal::FileSystem {
+public:
+  explicit GateFileSystem(std::shared_ptr<ReadGate> gate)
+      : inner_(tinylsm::internal::NewPosixFileSystem()), gate_(std::move(gate)) {}
+
+  tinylsm::Result<std::unique_ptr<tinylsm::internal::SequentialFile>>
+  OpenSequential(const std::filesystem::path& path) override {
+    return inner_->OpenSequential(path);
+  }
+
+  tinylsm::Result<std::unique_ptr<tinylsm::internal::RandomAccessFile>>
+  OpenRandomAccess(const std::filesystem::path& path) override {
+    auto opened = inner_->OpenRandomAccess(path);
+    if (!opened.ok())
+      return opened.status();
+    return std::unique_ptr<tinylsm::internal::RandomAccessFile>(
+        new GateRandomAccessFile(std::move(opened.value()), gate_));
+  }
+
+  tinylsm::Result<std::unique_ptr<tinylsm::internal::WritableFile>>
+  OpenWritable(const std::filesystem::path& path, bool append) override {
+    return inner_->OpenWritable(path, append);
+  }
+
+  tinylsm::Status CreateDir(const std::filesystem::path& path) override {
+    return inner_->CreateDir(path);
+  }
+  tinylsm::Result<std::vector<std::filesystem::path>>
+  ListDir(const std::filesystem::path& path) override {
+    return inner_->ListDir(path);
+  }
+  tinylsm::Status Rename(const std::filesystem::path& from,
+                         const std::filesystem::path& to) override {
+    return inner_->Rename(from, to);
+  }
+  tinylsm::Status Remove(const std::filesystem::path& path) override {
+    return inner_->Remove(path);
+  }
+  tinylsm::Status Truncate(const std::filesystem::path& path,
+                           std::uint64_t size) override {
+    return inner_->Truncate(path, size);
+  }
+  tinylsm::Result<bool> FileExists(const std::filesystem::path& path) override {
+    return inner_->FileExists(path);
+  }
+  tinylsm::Status SyncDir(const std::filesystem::path& path) override {
+    return inner_->SyncDir(path);
+  }
+
+private:
+  std::unique_ptr<tinylsm::internal::FileSystem> inner_;
+  std::shared_ptr<ReadGate> gate_;
+};
 
 void CorruptByte(const std::filesystem::path& path, std::uint64_t offset) {
   std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
@@ -143,6 +255,154 @@ TEST(SstableTest, BuildsMultipleBlocksAndReadsBoundaryKeys) {
   ASSERT_EQ(scan.value().size(), 2U);
   EXPECT_EQ(scan.value().front().user_key, "m");
   EXPECT_EQ(scan.value().back().user_key, "z");
+}
+
+TEST(BlockCacheTest, ReusesOnlySuccessfulValidatedBlocksAndCanBeDisabled) {
+  TempDir dir;
+  auto fs = tinylsm::internal::NewPosixFileSystem();
+  ASSERT_TRUE(fs->CreateDir(dir.path()).ok());
+  auto built = BuildTable(
+      *fs, dir.path(), 7,
+      {{"a", 1, tinylsm::internal::ValueType::kValue, std::string(20, 'a')},
+       {"m", 2, tinylsm::internal::ValueType::kValue, std::string(20, 'm')},
+       {"z", 3, tinylsm::internal::ValueType::kValue, std::string(20, 'z')}});
+  ASSERT_TRUE(built.ok());
+
+  auto metrics = std::make_shared<tinylsm::internal::ReadMetricsState>();
+  auto cache = std::make_shared<tinylsm::internal::BlockCache>(1024, metrics);
+  auto plan = std::make_shared<tinylsm::test::FaultPlan>();
+  plan->Fail(FaultOperation::kReadAt, "000007.sst", 3);
+  auto fault_fs = tinylsm::test::NewFaultInjectionFileSystem(plan);
+  auto file = fault_fs->OpenRandomAccess(dir.path() / "000007.sst");
+  ASSERT_TRUE(file.ok());
+  auto reader = tinylsm::internal::SSTableReader::Open(std::move(file.value()), 7,
+                                                       cache, metrics);
+  ASSERT_TRUE(reader.ok());
+
+  EXPECT_EQ(reader.value()->Get("a").status().code(), tinylsm::StatusCode::kIOError);
+  ASSERT_TRUE(reader.value()->Get("a").ok());
+  ASSERT_TRUE(reader.value()->Get("a").ok());
+  const auto cached = metrics->Snapshot();
+  EXPECT_EQ(cached.cache_misses, 2U);
+  EXPECT_EQ(cached.cache_inserts, 1U);
+  EXPECT_EQ(cached.cache_hits, 1U);
+  EXPECT_EQ(cached.block_reads, 1U);
+  EXPECT_EQ(cached.block_decodes, 1U);
+  EXPECT_LE(cached.cache_charge_bytes, cached.cache_capacity_bytes);
+
+  auto disabled_metrics = std::make_shared<tinylsm::internal::ReadMetricsState>();
+  auto disabled_cache =
+      std::make_shared<tinylsm::internal::BlockCache>(0, disabled_metrics);
+  auto disabled_file = fs->OpenRandomAccess(dir.path() / "000007.sst");
+  ASSERT_TRUE(disabled_file.ok());
+  auto disabled = tinylsm::internal::SSTableReader::Open(
+      std::move(disabled_file.value()), 7, disabled_cache, disabled_metrics);
+  ASSERT_TRUE(disabled.ok());
+  ASSERT_TRUE(disabled.value()->Get("a").ok());
+  ASSERT_TRUE(disabled.value()->Get("a").ok());
+  const auto uncached = disabled_metrics->Snapshot();
+  EXPECT_EQ(uncached.cache_hits, 0U);
+  EXPECT_EQ(uncached.cache_misses, 0U);
+  EXPECT_EQ(uncached.cache_charge_bytes, 0U);
+  EXPECT_EQ(uncached.block_reads, 2U);
+  EXPECT_EQ(uncached.block_decodes, 2U);
+}
+
+TEST(BlockCacheTest, EvictsLeastRecentlyUsedBlocksWithinChargeLimit) {
+  TempDir dir;
+  auto fs = tinylsm::internal::NewPosixFileSystem();
+  ASSERT_TRUE(fs->CreateDir(dir.path()).ok());
+  auto built = BuildTable(
+      *fs, dir.path(), 8,
+      {{"a", 1, tinylsm::internal::ValueType::kValue, std::string(20, 'a')},
+       {"m", 2, tinylsm::internal::ValueType::kValue, std::string(20, 'm')},
+       {"z", 3, tinylsm::internal::ValueType::kValue, std::string(20, 'z')}});
+  ASSERT_TRUE(built.ok());
+
+  auto metrics = std::make_shared<tinylsm::internal::ReadMetricsState>();
+  auto cache = std::make_shared<tinylsm::internal::BlockCache>(250, metrics);
+  auto file = fs->OpenRandomAccess(dir.path() / "000008.sst");
+  ASSERT_TRUE(file.ok());
+  auto reader = tinylsm::internal::SSTableReader::Open(std::move(file.value()), 8,
+                                                       cache, metrics);
+  ASSERT_TRUE(reader.ok());
+  ASSERT_TRUE(reader.value()->Get("a").ok());
+  ASSERT_TRUE(reader.value()->Get("m").ok());
+  ASSERT_TRUE(reader.value()->Get("z").ok());
+  ASSERT_TRUE(reader.value()->Get("a").ok());
+
+  const auto snapshot = metrics->Snapshot();
+  EXPECT_EQ(snapshot.cache_inserts, 4U);
+  EXPECT_EQ(snapshot.cache_evictions, 3U);
+  EXPECT_EQ(snapshot.cache_hits, 0U);
+  EXPECT_LE(snapshot.cache_charge_bytes, 250U);
+}
+
+TEST(DBConcurrencyTest, IndependentSstableGetsReachTheReadGateTogether) {
+  TempDir dir;
+  tinylsm::Options options;
+  options.memtable_bytes = 1;
+  options.sstable_block_bytes = 40;
+  options.block_cache_bytes = 0;
+  options.sync_on_write = false;
+  {
+    auto opened = tinylsm::DB::Open(dir.path(), options);
+    ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+    tinylsm::WriteBatch batch;
+    batch.Put("a", std::string(20, 'a'));
+    batch.Put("m", std::string(20, 'm'));
+    ASSERT_TRUE(opened.value()->Write(batch).ok());
+    ASSERT_TRUE(opened.value()->Close().ok());
+  }
+
+  auto gate = std::make_shared<ReadGate>();
+  auto opened = tinylsm::internal::DBTestPeer::Open(
+      dir.path(), options, std::make_unique<GateFileSystem>(gate));
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+  gate->Arm();
+  tinylsm::Result<std::string> first(tinylsm::Status::NotFound("not started"));
+  tinylsm::Result<std::string> second(tinylsm::Status::NotFound("not started"));
+  std::thread first_reader([&] { first = opened.value()->Get("a"); });
+  std::thread second_reader([&] { second = opened.value()->Get("m"); });
+  EXPECT_TRUE(gate->WaitForTwo());
+  gate->Release();
+  first_reader.join();
+  second_reader.join();
+
+  ASSERT_TRUE(first.ok()) << first.status().ToString();
+  ASSERT_TRUE(second.ok()) << second.status().ToString();
+  EXPECT_EQ(first.value(), std::string(20, 'a'));
+  EXPECT_EQ(second.value(), std::string(20, 'm'));
+  const auto metrics = opened.value()->GetReadMetrics();
+  EXPECT_EQ(metrics.read_lock_acquisitions, 2U);
+  EXPECT_EQ(metrics.write_lock_acquisitions, 0U);
+}
+
+TEST(BlockCacheTest, CompactionDropsOldTableEntriesBeforeReadersChange) {
+  TempDir dir;
+  tinylsm::Options options;
+  options.memtable_bytes = 1;
+  options.sstable_block_bytes = 40;
+  options.sync_on_write = false;
+  options.block_cache_bytes = 1024;
+  auto opened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+  tinylsm::WriteBatch batch;
+  batch.Put("a", std::string(20, 'a'));
+  batch.Put("m", std::string(20, 'm'));
+  ASSERT_TRUE(opened.value()->Write(batch).ok());
+  ASSERT_TRUE(opened.value()->Get("a").ok());
+  const auto before = opened.value()->GetReadMetrics();
+  ASSERT_GT(before.cache_charge_bytes, 0U);
+
+  ASSERT_TRUE(opened.value()->Compact().ok());
+  const auto after_compact = opened.value()->GetReadMetrics();
+  EXPECT_EQ(after_compact.cache_charge_bytes, 0U);
+  ASSERT_TRUE(opened.value()->Get("a").ok());
+  const auto after_read = opened.value()->GetReadMetrics();
+  EXPECT_GT(after_read.block_reads, after_compact.block_reads);
+  EXPECT_LE(after_read.cache_charge_bytes, after_read.cache_capacity_bytes);
 }
 
 TEST(SstableTest, PropertiesRejectIndexMismatchEmptyTableAndZeroSequence) {

@@ -4,6 +4,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <shared_mutex>
 #include <vector>
 
 #include "io/file.h"
@@ -29,6 +30,7 @@ public:
   Status Write(const WriteBatch& batch);
   Result<std::string> Get(std::string_view key) const;
   Result<std::vector<Entry>> Scan(std::string_view begin, std::string_view end) const;
+  [[nodiscard]] ReadMetrics GetReadMetrics() const noexcept;
   Status Compact();
   Status Close();
   ~Impl();
@@ -68,13 +70,15 @@ private:
   /// Readers are kept in the Manifest's oldest-to-newest order.
   std::vector<std::unique_ptr<internal::SSTableReader>> tables_;
   std::unique_ptr<internal::ManifestState> manifest_;
+  std::shared_ptr<internal::ReadMetricsState> read_metrics_;
+  std::shared_ptr<internal::BlockCache> block_cache_;
   /// Set when the authoritative on-disk Manifest is uncertain. Close remains
   /// available, but every data operation fails until the caller reopens the DB.
   std::optional<Status> terminal_error_;
   std::vector<std::filesystem::path> pending_cleanup_;
   std::uint64_t next_sequence_ = 1;
   bool closed_ = false;
-  mutable std::mutex mutex_;
+  mutable std::shared_mutex mutex_;
 };
 
 } // namespace tinylsm

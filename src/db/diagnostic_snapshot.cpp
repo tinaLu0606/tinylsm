@@ -10,7 +10,7 @@ Result<DiagnosticSnapshot> DBLabPeer::Snapshot(const DB& db) {
     return Status::AlreadyClosed("database implementation is unavailable");
 
   const auto& impl = *db.impl_;
-  std::scoped_lock lock(impl.mutex_);
+  std::shared_lock lock(impl.mutex_);
   if (!impl.manifest_)
     return Status::Corruption("database has no Manifest state");
 

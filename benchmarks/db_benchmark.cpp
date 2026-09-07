@@ -1,5 +1,6 @@
 #include <benchmark/benchmark.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <filesystem>
@@ -14,6 +15,7 @@
 #include <vector>
 
 #include "tinylsm/db.h"
+#include "tinylsm/read_metrics.h"
 #include "tinylsm/write_batch.h"
 
 #ifdef TINYLSM_HAVE_LEVELDB
@@ -62,15 +64,18 @@ public:
   virtual bool Scan(std::string_view begin, std::size_t expected) = 0;
   virtual bool Compact() = 0;
   virtual bool Close() = 0;
+  [[nodiscard]] virtual tinylsm::ReadMetrics ReadMetricsSnapshot() const = 0;
 };
 
 class TinyLsmEngine final : public Engine {
 public:
   static std::unique_ptr<TinyLsmEngine> Open(const std::filesystem::path& path,
-                                             bool sync, std::size_t memtable_bytes) {
+                                             bool sync, std::size_t memtable_bytes,
+                                             std::size_t block_cache_bytes) {
     tinylsm::Options options;
     options.sync_on_write = sync;
     options.memtable_bytes = memtable_bytes;
+    options.block_cache_bytes = block_cache_bytes;
     auto opened = tinylsm::DB::Open(path, options);
     if (!opened.ok())
       return nullptr;
@@ -102,6 +107,9 @@ public:
 
   bool Compact() override { return db_->Compact().ok(); }
   bool Close() override { return db_->Close().ok(); }
+  [[nodiscard]] tinylsm::ReadMetrics ReadMetricsSnapshot() const override {
+    return db_->GetReadMetrics();
+  }
 
 private:
   explicit TinyLsmEngine(std::unique_ptr<tinylsm::DB> db) : db_(std::move(db)) {}
@@ -112,7 +120,7 @@ private:
 class LevelDbEngine final : public Engine {
 public:
   static std::unique_ptr<LevelDbEngine> Open(const std::filesystem::path& path,
-                                             bool sync, std::size_t) {
+                                             bool sync, std::size_t, std::size_t) {
     leveldb::Options options;
     options.create_if_missing = true;
     options.compression = leveldb::kNoCompression;
@@ -163,6 +171,7 @@ public:
     db_.reset();
     return true;
   }
+  [[nodiscard]] tinylsm::ReadMetrics ReadMetricsSnapshot() const override { return {}; }
 
 private:
   LevelDbEngine(leveldb::DB* db, bool sync) : db_(db) { write_options_.sync = sync; }
@@ -175,15 +184,17 @@ private:
 enum class EngineKind { kTinyLsm, kLevelDb };
 
 std::unique_ptr<Engine> OpenEngine(EngineKind kind, const std::filesystem::path& path,
-                                   bool sync, std::size_t memtable_bytes) {
+                                   bool sync, std::size_t memtable_bytes,
+                                   std::size_t block_cache_bytes = 8U * 1024U * 1024U) {
   if (kind == EngineKind::kTinyLsm)
-    return TinyLsmEngine::Open(path, sync, memtable_bytes);
+    return TinyLsmEngine::Open(path, sync, memtable_bytes, block_cache_bytes);
 #ifdef TINYLSM_HAVE_LEVELDB
-  return LevelDbEngine::Open(path, sync, memtable_bytes);
+  return LevelDbEngine::Open(path, sync, memtable_bytes, block_cache_bytes);
 #else
   (void)path;
   (void)sync;
   (void)memtable_bytes;
+  (void)block_cache_bytes;
   return nullptr;
 #endif
 }
@@ -213,6 +224,21 @@ void SetMeasurements(benchmark::State& state, std::uint64_t operations,
   state.counters["operations"] = static_cast<double>(operations);
   state.counters["ops_per_second"] =
       benchmark::Counter(static_cast<double>(operations), benchmark::Counter::kIsRate);
+}
+
+void SetReadMeasurements(benchmark::State& state, std::uint64_t operations,
+                         std::uint64_t bytes, double elapsed,
+                         const tinylsm::ReadMetrics& before,
+                         const tinylsm::ReadMetrics& after) {
+  SetMeasurements(state, operations, bytes, elapsed);
+  state.counters["table_probes"] = after.table_probes - before.table_probes;
+  state.counters["block_reads"] = after.block_reads - before.block_reads;
+  state.counters["block_decodes"] = after.block_decodes - before.block_decodes;
+  state.counters["cache_hits"] = after.cache_hits - before.cache_hits;
+  state.counters["cache_misses"] = after.cache_misses - before.cache_misses;
+  state.counters["cache_inserts"] = after.cache_inserts - before.cache_inserts;
+  state.counters["cache_evictions"] = after.cache_evictions - before.cache_evictions;
+  state.counters["cache_charge_bytes"] = after.cache_charge_bytes;
 }
 
 void FillSequential(benchmark::State& state, EngineKind kind, bool sync,
@@ -348,8 +374,147 @@ void ReadRandom(benchmark::State& state, EngineKind kind, bool found,
   }
 }
 
+bool PutBatch(Engine& engine, std::uint64_t records, std::size_t value_bytes,
+              std::uint64_t first = 0, std::uint64_t stride = 1) {
+  std::vector<std::pair<std::string, std::string>> entries;
+  entries.reserve(static_cast<std::size_t>(records));
+  for (std::uint64_t i = 0; i < records; ++i) {
+    const auto index = first + i * stride;
+    entries.emplace_back(Key(index), Value(index, value_bytes));
+  }
+  return engine.WriteBatch(entries);
+}
+
+void ReadMemTableHit(benchmark::State& state, std::uint64_t records,
+                     std::uint64_t reads, std::size_t value_bytes) {
+  for (auto _ : state) {
+    (void)_;
+    TemporaryDirectory directory("read-memtable");
+    auto engine =
+        OpenEngine(EngineKind::kTinyLsm, directory.path(), false, 256U * 1024U * 1024U);
+    if (!engine || !PutBatch(*engine, records, value_bytes)) {
+      state.SkipWithError("prepare MemTable failed");
+      return;
+    }
+
+    std::uint64_t random = 0x5eedULL;
+    const auto metrics_before = engine->ReadMetricsSnapshot();
+    const auto started = Clock::now();
+    for (std::uint64_t i = 0; i < reads; ++i) {
+      if (!engine->Get(Key(NextRandom(random) % records), true)) {
+        state.SkipWithError("MemTable get result mismatch");
+        return;
+      }
+    }
+    const auto stopped = Clock::now();
+    SetReadMeasurements(state, reads, reads * (16 + value_bytes),
+                        std::chrono::duration<double>(stopped - started).count(),
+                        metrics_before, engine->ReadMetricsSnapshot());
+  }
+}
+
+void ReadSingleTableHit(benchmark::State& state, std::uint64_t records,
+                        std::uint64_t reads, std::size_t value_bytes,
+                        std::size_t block_cache_bytes) {
+  for (auto _ : state) {
+    (void)_;
+    TemporaryDirectory directory("read-single-table");
+    auto engine =
+        OpenEngine(EngineKind::kTinyLsm, directory.path(), false, 1, block_cache_bytes);
+    if (!engine || !PutBatch(*engine, records, value_bytes)) {
+      state.SkipWithError("prepare single SSTable failed");
+      return;
+    }
+
+    std::uint64_t random = 0x5eedULL;
+    const auto metrics_before = engine->ReadMetricsSnapshot();
+    const auto started = Clock::now();
+    for (std::uint64_t i = 0; i < reads; ++i) {
+      if (!engine->Get(Key(NextRandom(random) % records), true)) {
+        state.SkipWithError("single-SSTable get result mismatch");
+        return;
+      }
+    }
+    const auto stopped = Clock::now();
+    SetReadMeasurements(state, reads, reads * (16 + value_bytes),
+                        std::chrono::duration<double>(stopped - started).count(),
+                        metrics_before, engine->ReadMetricsSnapshot());
+  }
+}
+
+void ReadMultiTable(benchmark::State& state, bool found, std::uint64_t records,
+                    std::uint64_t reads, std::size_t value_bytes) {
+  constexpr std::uint64_t kTables = 4;
+  for (auto _ : state) {
+    (void)_;
+    TemporaryDirectory directory(found ? "read-multi-hit" : "read-multi-miss");
+    auto engine = OpenEngine(EngineKind::kTinyLsm, directory.path(), false, 1);
+    if (!engine) {
+      state.SkipWithError("open failed");
+      return;
+    }
+    for (std::uint64_t table = 0; table < kTables; ++table) {
+      if (!PutBatch(*engine, records / kTables, value_bytes, table * 2, kTables * 2)) {
+        state.SkipWithError("prepare overlapping SSTables failed");
+        return;
+      }
+    }
+
+    std::uint64_t random = 0x5eedULL;
+    const auto metrics_before = engine->ReadMetricsSnapshot();
+    const auto started = Clock::now();
+    for (std::uint64_t i = 0; i < reads; ++i) {
+      const auto base = NextRandom(random) % (records / kTables);
+      const auto index = found ? base * kTables * 2 : base * kTables * 2 + 1;
+      if (!engine->Get(Key(index), found)) {
+        state.SkipWithError("multi-SSTable get result mismatch");
+        return;
+      }
+    }
+    const auto stopped = Clock::now();
+    SetReadMeasurements(state, reads, reads * (16 + (found ? value_bytes : 0)),
+                        std::chrono::duration<double>(stopped - started).count(),
+                        metrics_before, engine->ReadMetricsSnapshot());
+  }
+}
+
+void ReadRepeatedHit(benchmark::State& state, std::uint64_t records,
+                     std::uint64_t working_set, std::uint64_t reads,
+                     std::size_t value_bytes, std::size_t block_cache_bytes) {
+  for (auto _ : state) {
+    (void)_;
+    TemporaryDirectory directory("read-repeated");
+    auto engine =
+        OpenEngine(EngineKind::kTinyLsm, directory.path(), false, 1, block_cache_bytes);
+    if (!engine || !PutBatch(*engine, records, value_bytes)) {
+      state.SkipWithError("prepare repeated-hit SSTable failed");
+      return;
+    }
+    for (std::uint64_t i = 0; i < working_set; ++i) {
+      if (!engine->Get(Key(i), true)) {
+        state.SkipWithError("warmup get failed");
+        return;
+      }
+    }
+
+    std::uint64_t random = 0x5eedULL;
+    const auto metrics_before = engine->ReadMetricsSnapshot();
+    const auto started = Clock::now();
+    for (std::uint64_t i = 0; i < reads; ++i) {
+      if (!engine->Get(Key(NextRandom(random) % working_set), true)) {
+        state.SkipWithError("repeated get result mismatch");
+        return;
+      }
+    }
+    const auto stopped = Clock::now();
+    SetReadMeasurements(state, reads, reads * (16 + value_bytes),
+                        std::chrono::duration<double>(stopped - started).count(),
+                        metrics_before, engine->ReadMetricsSnapshot());
+  }
+}
+
 void ScanTail(benchmark::State& state, EngineKind kind, std::uint64_t records,
-              std::size_t returned, std::size_t value_bytes) {
+              std::size_t returned, std::size_t scans, std::size_t value_bytes) {
   for (auto _ : state) {
     (void)_;
     TemporaryDirectory directory("scan");
@@ -366,13 +531,131 @@ void ScanTail(benchmark::State& state, EngineKind kind, std::uint64_t records,
     }
 
     const auto started = Clock::now();
-    const bool correct = engine->Scan(Key(records - returned), returned);
+    bool correct = true;
+    for (std::size_t scan = 0; scan < scans && correct; ++scan)
+      correct = engine->Scan(Key(records - returned), returned);
     const auto stopped = Clock::now();
     if (!correct) {
       state.SkipWithError("scan result mismatch");
       return;
     }
-    SetMeasurements(state, returned, returned * (16 + value_bytes),
+    const auto operations = returned * scans;
+    SetMeasurements(state, operations, operations * (16 + value_bytes),
+                    std::chrono::duration<double>(stopped - started).count());
+  }
+}
+
+void ScanSingleTable(benchmark::State& state, std::uint64_t records,
+                     std::size_t returned, std::size_t scans, std::size_t value_bytes,
+                     std::size_t block_cache_bytes) {
+  for (auto _ : state) {
+    (void)_;
+    TemporaryDirectory directory("scan-single-table");
+    auto engine =
+        OpenEngine(EngineKind::kTinyLsm, directory.path(), false, 1, block_cache_bytes);
+    if (!engine || !PutBatch(*engine, records, value_bytes)) {
+      state.SkipWithError("prepare single-table Scan failed");
+      return;
+    }
+
+    bool correct = true;
+    const auto metrics_before = engine->ReadMetricsSnapshot();
+    const auto started = Clock::now();
+    for (std::size_t scan = 0; scan < scans && correct; ++scan)
+      correct = engine->Scan(Key(records - returned), returned);
+    const auto stopped = Clock::now();
+    if (!correct) {
+      state.SkipWithError("single-table Scan result mismatch");
+      return;
+    }
+    const auto operations = returned * scans;
+    SetReadMeasurements(state, operations, operations * (16 + value_bytes),
+                        std::chrono::duration<double>(stopped - started).count(),
+                        metrics_before, engine->ReadMetricsSnapshot());
+  }
+}
+
+void ScanMultiTable(benchmark::State& state, std::uint64_t records,
+                    std::size_t returned, std::size_t scans, std::size_t value_bytes,
+                    std::size_t block_cache_bytes) {
+  constexpr std::uint64_t kTables = 4;
+  for (auto _ : state) {
+    (void)_;
+    TemporaryDirectory directory("scan-multi-table");
+    auto engine =
+        OpenEngine(EngineKind::kTinyLsm, directory.path(), false, 1, block_cache_bytes);
+    if (!engine) {
+      state.SkipWithError("open failed");
+      return;
+    }
+    for (std::uint64_t table = 0; table < kTables; ++table) {
+      if (!PutBatch(*engine, records / kTables, value_bytes, table * 2, kTables * 2)) {
+        state.SkipWithError("prepare multi-table Scan failed");
+        return;
+      }
+    }
+
+    bool correct = true;
+    const auto metrics_before = engine->ReadMetricsSnapshot();
+    const auto started = Clock::now();
+    for (std::size_t scan = 0; scan < scans && correct; ++scan)
+      correct = engine->Scan(Key((records - returned) * 2), returned);
+    const auto stopped = Clock::now();
+    if (!correct) {
+      state.SkipWithError("multi-table Scan result mismatch");
+      return;
+    }
+    const auto operations = returned * scans;
+    SetReadMeasurements(state, operations, operations * (16 + value_bytes),
+                        std::chrono::duration<double>(stopped - started).count(),
+                        metrics_before, engine->ReadMetricsSnapshot());
+  }
+}
+
+void ConcurrentRead(benchmark::State& state, std::size_t thread_count,
+                    std::uint64_t records, std::uint64_t total_reads,
+                    std::size_t value_bytes) {
+  for (auto _ : state) {
+    (void)_;
+    TemporaryDirectory directory("concurrent-read");
+    auto engine = OpenEngine(EngineKind::kTinyLsm, directory.path(), false, 1);
+    if (!engine || !PutBatch(*engine, records, value_bytes)) {
+      state.SkipWithError("prepare concurrent-read SSTable failed");
+      return;
+    }
+
+    std::atomic<std::size_t> ready = 0;
+    std::atomic<bool> start = false;
+    std::vector<int> succeeded(thread_count);
+    std::vector<std::thread> threads;
+    threads.reserve(thread_count);
+    const auto reads_per_thread = total_reads / thread_count;
+    for (std::size_t thread = 0; thread < thread_count; ++thread) {
+      threads.emplace_back([&, thread] {
+        std::uint64_t random = 0x5eedULL + thread;
+        ready.fetch_add(1, std::memory_order_release);
+        while (!start.load(std::memory_order_acquire))
+          std::this_thread::yield();
+        bool ok = true;
+        for (std::uint64_t i = 0; i < reads_per_thread && ok; ++i)
+          ok = engine->Get(Key(NextRandom(random) % records), true);
+        succeeded[thread] = ok ? 1 : 0;
+      });
+    }
+    while (ready.load(std::memory_order_acquire) != thread_count)
+      std::this_thread::yield();
+    const auto started = Clock::now();
+    start.store(true, std::memory_order_release);
+    for (auto& thread : threads)
+      thread.join();
+    const auto stopped = Clock::now();
+    if (std::find(succeeded.begin(), succeeded.end(), 0) != succeeded.end()) {
+      state.SkipWithError("concurrent get failed");
+      return;
+    }
+
+    const auto operations = reads_per_thread * thread_count;
+    SetMeasurements(state, operations, operations * (16 + value_bytes),
                     std::chrono::duration<double>(stopped - started).count());
   }
 }
@@ -428,8 +711,8 @@ void RegisterCommon(std::string_view prefix, EngineKind kind) {
       ->Iterations(1)
       ->Repetitions(5)
       ->UseManualTime();
-  benchmark::RegisterBenchmark((std::string(prefix) + "/ScanTail1000").c_str(),
-                               ScanTail, kind, 100'000, 1'000, 100)
+  benchmark::RegisterBenchmark((std::string(prefix) + "/ScanTail10000Repeated").c_str(),
+                               ScanTail, kind, 100'000, 10'000, 20, 100)
       ->Iterations(1)
       ->Repetitions(5)
       ->UseManualTime();
@@ -456,6 +739,66 @@ const bool registered = [] {
 #ifdef TINYLSM_HAVE_LEVELDB
   RegisterCommon("LevelDB", EngineKind::kLevelDb);
 #endif
+  benchmark::RegisterBenchmark("TinyLSM/ReadMemTableHit", ReadMemTableHit, 25'000,
+                               200'000, 100)
+      ->Iterations(1)
+      ->Repetitions(5)
+      ->UseManualTime();
+  benchmark::RegisterBenchmark("TinyLSM/ReadSingleTableHit", ReadSingleTableHit, 25'000,
+                               50'000, 100, 8U * 1024U * 1024U)
+      ->Iterations(1)
+      ->Repetitions(5)
+      ->UseManualTime();
+  benchmark::RegisterBenchmark("TinyLSM/ReadMultiTableHit", ReadMultiTable, true,
+                               25'000, 25'000, 100)
+      ->Iterations(1)
+      ->Repetitions(5)
+      ->UseManualTime();
+  benchmark::RegisterBenchmark("TinyLSM/ReadMultiTableMiss", ReadMultiTable, false,
+                               25'000, 25'000, 100)
+      ->Iterations(1)
+      ->Repetitions(5)
+      ->UseManualTime();
+  benchmark::RegisterBenchmark("TinyLSM/ReadRepeatedHit", ReadRepeatedHit, 25'000, 256,
+                               50'000, 100, 8U * 1024U * 1024U)
+      ->Iterations(1)
+      ->Repetitions(5)
+      ->UseManualTime();
+  benchmark::RegisterBenchmark("TinyLSM/ScanSingleTableRepeated", ScanSingleTable,
+                               25'000, 10'000, 20, 100, 8U * 1024U * 1024U)
+      ->Iterations(1)
+      ->Repetitions(5)
+      ->UseManualTime();
+  benchmark::RegisterBenchmark("TinyLSM/ScanMultiTableRepeated", ScanMultiTable, 25'000,
+                               10'000, 20, 100, 8U * 1024U * 1024U)
+      ->Iterations(1)
+      ->Repetitions(5)
+      ->UseManualTime();
+  // This long, single-repetition case exists for process-wide profilers. It is
+  // excluded from the fixed before/after result filter.
+  benchmark::RegisterBenchmark("TinyLSM/ScanProfile", ScanMultiTable, 25'000, 10'000,
+                               500, 100, 0)
+      ->Iterations(1)
+      ->Repetitions(1)
+      ->UseManualTime();
+  benchmark::RegisterBenchmark("TinyLSM/ReadRepeatedHitCacheDisabled", ReadRepeatedHit,
+                               25'000, 256, 50'000, 100, 0)
+      ->Iterations(1)
+      ->Repetitions(5)
+      ->UseManualTime();
+  benchmark::RegisterBenchmark("TinyLSM/ScanMultiTableCacheDisabled", ScanMultiTable,
+                               25'000, 10'000, 20, 100, 0)
+      ->Iterations(1)
+      ->Repetitions(5)
+      ->UseManualTime();
+  for (const std::size_t threads : {1U, 2U, 4U, 8U}) {
+    benchmark::RegisterBenchmark(
+        ("TinyLSM/ConcurrentRead" + std::to_string(threads)).c_str(), ConcurrentRead,
+        threads, 25'000, 40'000, 100)
+        ->Iterations(1)
+        ->Repetitions(5)
+        ->UseManualTime();
+  }
   benchmark::RegisterBenchmark("TinyLSM/CompactManyTables", CompactManyTables, 100'000,
                                100)
       ->Iterations(1)

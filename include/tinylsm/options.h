@@ -29,6 +29,10 @@ struct Options {
   /// Target uncompressed data-block size, in bytes. Must be non-zero.
   /// A single oversized entry is allowed to occupy a larger block by itself.
   std::size_t sstable_block_bytes = 16U * 1024U;
+
+  /// Maximum logical charge of validated decoded SSTable blocks retained by
+  /// this DB handle. Zero disables the Block Cache.
+  std::size_t block_cache_bytes = 8U * 1024U * 1024U;
 };
 
 } // namespace tinylsm

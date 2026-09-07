@@ -7,7 +7,7 @@ target_sources(tinylsm PRIVATE
   iterator/internal_iterator.cpp
   manifest/manifest_codec.cpp manifest/manifest_state.cpp
   memtable/memtable.cpp
-  sstable/sstable_builder.cpp sstable/sstable_reader.cpp
+  sstable/block_cache.cpp sstable/sstable_builder.cpp sstable/sstable_reader.cpp
   util/coding.cpp util/crc32c.cpp
   wal/wal_reader.cpp wal/wal_record_codec.cpp wal/wal_writer.cpp
 )

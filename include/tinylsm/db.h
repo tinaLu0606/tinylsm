@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "tinylsm/options.h"
+#include "tinylsm/read_metrics.h"
 #include "tinylsm/result.h"
 #include "tinylsm/types.h"
 #include "tinylsm/write_batch.h"
@@ -21,7 +22,9 @@ class DBLabPeer;
 /// A movable, non-copyable key-value database handle.
 ///
 /// Keys and values are arbitrary byte strings. Public operations on one DB
-/// instance are internally serialized and may be called from multiple threads.
+/// instance may be called from multiple threads: Get(), Scan(), and internal
+/// diagnostic snapshots share a read lock; Put(), Delete(), Write(), Compact(),
+/// and Close() take the exclusive lock. A long Scan can therefore delay a writer.
 /// Moving or destroying an instance still requires exclusive ownership.
 /// Expected database failures use Status/Result. Standard-library and dependency
 /// exceptions, including std::bad_alloc, may propagate through this interface.
@@ -81,6 +84,10 @@ public:
   /// An empty `end` means the range is unbounded above. Deleted entries are not
   /// returned. A non-empty end less than begin returns kInvalidArgument.
   Result<std::vector<Entry>> Scan(std::string_view begin, std::string_view end) const;
+
+  /// Returns cumulative read-path and lock counters without resetting them.
+  /// Metrics remain available after Close().
+  [[nodiscard]] ReadMetrics GetReadMetrics() const noexcept;
 
   /// Rewrites all currently published SSTables into zero or one replacement.
   ///

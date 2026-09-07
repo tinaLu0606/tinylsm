@@ -7,6 +7,7 @@
 #include "io/file.h"
 #include "iterator/internal_iterator.h"
 #include "model/internal_entry.h"
+#include "sstable/block_cache.h"
 #include "sstable/sstable_format.h"
 
 namespace tinylsm::internal {
@@ -24,7 +25,9 @@ class SSTableReader {
 public:
   /// Validates and loads the footer and index without loading all data blocks.
   static Result<std::unique_ptr<SSTableReader>>
-  Open(std::unique_ptr<RandomAccessFile> file);
+  Open(std::unique_ptr<RandomAccessFile> file, std::uint64_t table_number = 0,
+       std::shared_ptr<BlockCache> block_cache = {},
+       std::shared_ptr<ReadMetricsState> metrics = {});
   [[nodiscard]] std::uint64_t file_size() const { return file_size_; }
   Result<SSTableProperties> ValidateAndGetProperties() const;
   Result<InternalEntry> Get(std::string_view key) const;
@@ -39,12 +42,20 @@ public:
 private:
   class Iterator;
   SSTableReader(std::unique_ptr<RandomAccessFile> file, std::uint64_t file_size,
-                std::vector<BlockMeta> blocks)
-      : file_(std::move(file)), file_size_(file_size), blocks_(std::move(blocks)) {}
-  Result<std::vector<InternalEntry>> ReadBlock(const BlockMeta& meta) const;
+                std::vector<BlockMeta> blocks, std::uint64_t table_number,
+                std::shared_ptr<BlockCache> block_cache,
+                std::shared_ptr<ReadMetricsState> metrics)
+      : file_(std::move(file)), file_size_(file_size), blocks_(std::move(blocks)),
+        table_number_(table_number), block_cache_(std::move(block_cache)),
+        metrics_(std::move(metrics)) {}
+  Result<BlockCache::BlockPtr> ReadBlock(const BlockMeta& meta,
+                                         bool use_cache = true) const;
   std::unique_ptr<RandomAccessFile> file_;
   std::uint64_t file_size_ = 0;
   std::vector<BlockMeta> blocks_;
+  std::uint64_t table_number_ = 0;
+  std::shared_ptr<BlockCache> block_cache_;
+  std::shared_ptr<ReadMetricsState> metrics_;
 };
 
 } // namespace tinylsm::internal

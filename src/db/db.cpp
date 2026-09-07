@@ -20,6 +20,9 @@ Status DB::Write(const WriteBatch& batch) { return impl_->Write(batch); }
 Result<std::vector<Entry>> DB::Scan(std::string_view b, std::string_view e) const {
   return impl_->Scan(b, e);
 }
+ReadMetrics DB::GetReadMetrics() const noexcept {
+  return impl_ ? impl_->GetReadMetrics() : ReadMetrics{};
+}
 Status DB::Compact() { return impl_->Compact(); }
 Status DB::Close() { return impl_->Close(); }
 } // namespace tinylsm
