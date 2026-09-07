@@ -8,10 +8,10 @@
 
 #include "tinylsm/options.h"
 #include "tinylsm/read_metrics.h"
-#include "tinylsm/write_metrics.h"
 #include "tinylsm/result.h"
 #include "tinylsm/types.h"
 #include "tinylsm/write_batch.h"
+#include "tinylsm/write_metrics.h"
 
 namespace tinylsm {
 

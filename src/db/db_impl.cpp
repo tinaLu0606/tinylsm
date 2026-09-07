@@ -44,8 +44,7 @@ void RecordWriteLockWait(const std::shared_ptr<internal::ReadMetricsState>& metr
       std::memory_order_relaxed);
 }
 
-template <typename T>
-T LoadMetric(const std::atomic<T>& value) noexcept {
+template <typename T> T LoadMetric(const std::atomic<T>& value) noexcept {
   return value.load(std::memory_order_relaxed);
 }
 
@@ -273,8 +272,7 @@ Status DB::Impl::OpenManifestSSTables(const internal::ManifestSnapshot& snapshot
 }
 
 Status DB::Impl::RecoverWal(std::uint64_t wal_number, std::uint64_t floor,
-                            internal::MemTable& target,
-                            std::uint64_t* recovered_max) {
+                            internal::MemTable& target, std::uint64_t* recovered_max) {
   const auto wal_path = *path_ / internal::WalFileName(wal_number);
   auto wal_exists = fs_->FileExists(wal_path);
   if (!wal_exists.ok())
@@ -287,10 +285,10 @@ Status DB::Impl::RecoverWal(std::uint64_t wal_number, std::uint64_t floor,
     return seq.status().WithContext("open WAL for replay");
 
   internal::WalReader reader(std::move(seq.value()), Limits(options_));
-  auto replay = reader.Replay(floor,
-                              [&](std::span<const internal::InternalEntry> entries) {
-                                return target.ApplyBatch(entries);
-                              });
+  auto replay =
+      reader.Replay(floor, [&](std::span<const internal::InternalEntry> entries) {
+        return target.ApplyBatch(entries);
+      });
   if (!replay.ok())
     return replay.status().WithContext("replay WAL");
 
@@ -323,8 +321,8 @@ Status DB::Impl::RecoverWals(const internal::ManifestSnapshot& snapshot) {
     immutable_memtable_ = std::move(immutable);
   }
 
-  auto s = RecoverWal(snapshot.active_wal_number, recovered_max, memtable_,
-                      &recovered_max);
+  auto s =
+      RecoverWal(snapshot.active_wal_number, recovered_max, memtable_, &recovered_max);
   if (!s.ok())
     return s.WithContext("replay active WAL");
 
@@ -333,7 +331,8 @@ Status DB::Impl::RecoverWals(const internal::ManifestSnapshot& snapshot) {
     return Status::ResourceExhausted("sequence space is exhausted");
   next_sequence_ = max_seq + 1;
 
-  const auto active_wal_path = *path_ / internal::WalFileName(snapshot.active_wal_number);
+  const auto active_wal_path =
+      *path_ / internal::WalFileName(snapshot.active_wal_number);
   auto writable = fs_->OpenWritable(active_wal_path, true);
   if (!writable.ok())
     return writable.status().WithContext("open active WAL for append");
@@ -589,7 +588,8 @@ Status DB::Impl::FlushImmutableMemTable() {
   auto file = fs_->OpenWritable(temp, false);
   if (!file.ok())
     return file.status().WithContext("create temporary immutable SSTable");
-  internal::SSTableBuilder builder(std::move(file.value()), options_.sstable_block_bytes);
+  internal::SSTableBuilder builder(std::move(file.value()),
+                                   options_.sstable_block_bytes);
   for (const auto& entry : entries) {
     auto status = builder.Add(entry);
     if (!status.ok())
@@ -602,8 +602,8 @@ Status DB::Impl::FlushImmutableMemTable() {
   auto verify_file = fs_->OpenRandomAccess(temp);
   if (!verify_file.ok())
     return verify_file.status().WithContext("open immutable SSTable for validation");
-  auto verified = internal::SSTableReader::Open(std::move(verify_file.value()), table_number,
-                                                block_cache_, read_metrics_);
+  auto verified = internal::SSTableReader::Open(
+      std::move(verify_file.value()), table_number, block_cache_, read_metrics_);
   if (!verified.ok())
     return verified.status().WithContext("validate immutable SSTable");
   auto properties = verified.value()->ValidateAndGetProperties();
@@ -617,26 +617,27 @@ Status DB::Impl::FlushImmutableMemTable() {
     return status.WithContext("sync database directory after immutable SSTable rename");
 
   std::unique_lock lock(mutex_);
-  if (!immutable_memtable_ || manifest_->current().immutable_wal_number !=
-                                 immutable_wal_number ||
+  if (!immutable_memtable_ ||
+      manifest_->current().immutable_wal_number != immutable_wal_number ||
       manifest_->current().active_wal_number != table_number + 1) {
     return Status::Corruption("immutable flush state changed unexpectedly");
   }
   internal::ManifestSnapshot next = manifest_->current();
   next.immutable_wal_number = 0;
   next.last_sequence = built.value().max_sequence;
-  next.live_tables.push_back(
-      {table_number, built.value().file_size, built.value().smallest_key,
-       built.value().largest_key, built.value().min_sequence, built.value().max_sequence});
+  next.live_tables.push_back({table_number, built.value().file_size,
+                              built.value().smallest_key, built.value().largest_key,
+                              built.value().min_sequence, built.value().max_sequence});
   if (!Matches(next.live_tables.back(), properties.value()))
     return Status::Corruption("built immutable SSTable metadata does not match file");
 
   auto published = manifest_->Publish(std::move(next));
   if (!published.durable()) {
     if (published.state() == internal::ManifestPublishState::kVisibleNotDurable) {
-      terminal_error_ = published.status().WithContext(
-          "publish immutable flush MANIFEST: replacement may be visible; close and reopen "
-          "the database");
+      terminal_error_ =
+          published.status().WithContext("publish immutable flush MANIFEST: "
+                                         "replacement may be visible; close and reopen "
+                                         "the database");
       return *terminal_error_;
     }
     return published.status().WithContext("publish immutable flush MANIFEST");
@@ -670,7 +671,8 @@ void DB::Impl::BackgroundFlushLoop() noexcept {
     try {
       status = FlushImmutableMemTable();
     } catch (const std::exception& error) {
-      status = Status::IOError(std::string("background flush exception: ") + error.what());
+      status =
+          Status::IOError(std::string("background flush exception: ") + error.what());
     } catch (...) {
       status = Status::IOError("background flush raised an unknown exception");
     }
@@ -723,7 +725,8 @@ void DB::Impl::StopBackgroundWorker() noexcept {
 void DB::Impl::WaitForBackgroundFlush(std::unique_lock<std::shared_mutex>& lock) {
   background_cv_.wait(lock, [&] {
     return (!immutable_memtable_ && !background_flush_running_) ||
-           terminal_error_.has_value() || background_error_.has_value() || worker_stopping_;
+           terminal_error_.has_value() || background_error_.has_value() ||
+           worker_stopping_;
   });
 }
 

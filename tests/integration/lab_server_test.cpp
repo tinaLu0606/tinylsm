@@ -120,10 +120,11 @@ TEST(LabStorageInspectorTest, PagesCanonicalWalAndSstableBytesWithoutEscapingDat
               {.kind = OperationKind::kPut, .key = "beta", .value = "second-value"})
           .status.ok());
   ASSERT_TRUE(session.Close().ok());
-  opened = session.Open(dir.path() / "live", tinylsm::Options{.memtable_bytes = 128,
-                                                               .max_key_bytes = 4096,
-                                                               .max_value_bytes = 4096,
-                                                               .sstable_block_bytes = 32});
+  opened =
+      session.Open(dir.path() / "live", tinylsm::Options{.memtable_bytes = 128,
+                                                         .max_key_bytes = 4096,
+                                                         .max_value_bytes = 4096,
+                                                         .sstable_block_bytes = 32});
   ASSERT_TRUE(opened.ok()) << opened.status().ToString();
   const auto state = session.GetState();
   ASSERT_FALSE(state.tables.empty());

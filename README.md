@@ -198,9 +198,10 @@ int main() {
 }
 ```
 
-Keys and values are byte strings. Database handles are movable but non-copyable
-and public operations on the same handle are internally serialized. Moving or
-destroying a handle still requires exclusive ownership.
+Keys and values are byte strings. Database handles are movable but non-copyable.
+`Get`, `Scan`, and diagnostic snapshots share a read lock; writes, compaction,
+and close use the exclusive state boundary. Moving or destroying a handle still
+requires exclusive ownership.
 
 `WriteBatch` groups several ordered `Put`/`Delete` operations into one WAL
 record and one optional WAL sync. Recovery applies a complete record in full
@@ -214,6 +215,11 @@ batch.Put("account:a", "90");
 batch.Put("account:b", "110");
 auto status = db->Write(batch);
 ```
+
+`GetWriteMetrics()` returns cumulative, point-in-time write-path counters for
+one handle: WAL syncs, MemTable rotations, successful/failed background flushes,
+backpressure waits and duration, plus current and maximum immutable-generation
+queue depth/bytes. It is an observability aid, not a latency benchmark by itself.
 
 ## Implemented scope
 
@@ -302,7 +308,18 @@ Put/Delete or WriteBatch
     -> append one complete record to WAL
     -> optionally fsync WAL
     -> apply one entry or the complete batch to MemTable
-    -> flush after the operation/batch when the memory threshold is reached
+    -> when full, create next active WAL and durably publish
+       {active WAL, one immutable WAL} in Manifest v3
+    -> move old MemTable/WAL to the one-item immutable generation
+    -> one background worker builds and verifies its SSTable
+    -> durably publish the SSTable and clear immutable WAL from Manifest
+    -> best-effort remove the now-unreferenced immutable WAL
+
+If a second active generation fills while the immutable one is still pending,
+the foreground writer waits. This bounds the asynchronous write queue at one
+immutable MemTable/WAL pair instead of admitting unbounded memory. A background
+failure becomes sticky for later data operations and `Close`; a caller closes
+and reopens after a visible-but-not-durable Manifest publication failure.
 ```
 
 Every delete is stored as a tombstone rather than removing older bytes in place.
@@ -323,16 +340,17 @@ iterators keep at most one decoded block at a time; a later block failure makes
 the whole scan fail instead of returning a partial result. The public API still
 materializes the final `vector<Entry>`.
 
-### Flush commit protocol
+### Asynchronous flush commit protocol
 
 ```text
-MemTable
-    -> build and verify temporary SSTable
-    -> rename SSTable and sync the database directory
-    -> create and sync a replacement WAL
-    -> append the table to a new Manifest       <- durable commit point
-    -> switch the live in-memory table/WAL state
-    -> best-effort remove the old WAL
+active MemTable/WAL reaches threshold
+    -> create and sync the replacement active WAL
+    -> Manifest v3: old WAL becomes immutable, replacement is active
+                                               <- rotation commit point
+    -> background worker builds, validates, renames, and directory-syncs SST
+    -> Manifest v3: add SSTable and clear immutable WAL
+                                               <- flush commit point
+    -> release immutable MemTable and best-effort remove its old WAL
 ```
 
 ### Compaction commit protocol
@@ -378,8 +396,10 @@ Open database
     -> load the authoritative Manifest
     -> validate and open every referenced SSTable
     -> read all live data blocks and verify true key/sequence metadata
-    -> replay its active WAL into a fresh MemTable
-    -> require WAL sequences to increase beyond the published sequence
+    -> replay the optional immutable WAL, then the active WAL, into their
+       corresponding MemTables
+    -> require every replayed WAL sequence to increase beyond the published
+       sequence and the previous replayed WAL
     -> truncate an incomplete WAL tail when recoverable
     -> continue from the highest recovered sequence number
     -> remove only canonical files not referenced by the recovered Manifest
@@ -394,11 +414,12 @@ version-2 batch record. A batch contains consecutive sequence numbers and one
 checksum covering its complete payload; mixed old and new records can therefore
 be recovered during an in-place format transition.
 
-Manifest version 2 stores live tables in oldest-to-newest order and protects the
-header plus Protobuf payload with CRC32C. The reader also accepts fixed version-1
-zero-table and single-table snapshots. Because the current SSTable format has no
-table-level sequence properties block, startup reads every live data block to
-verify the Manifest metadata; Open therefore costs `O(total live SSTable bytes)`.
+Manifest version 3 stores an active WAL, an optional immutable WAL, and live
+tables in oldest-to-newest order, protected by CRC32C over its header and
+Protobuf payload. The reader accepts fixed version-1 and version-2 snapshots,
+which have no immutable WAL. Because the current SSTable format has no table-level
+sequence properties block, startup reads every live data block to verify the
+Manifest metadata; Open therefore costs `O(total live SSTable bytes)`.
 
 ## Current limitations
 
@@ -406,6 +427,10 @@ TinyLSM currently favors clarity and testability over feature breadth:
 
 - Compaction is explicit, synchronous, and full-table only; there is no
   automatic trigger, background worker, or multi-level layout.
+- A live SSTable reader retains its file handle until explicit compaction or
+  close. Long write-only runs therefore need a MemTable threshold/workload that
+  stays below the process file-descriptor limit; automated table-set management
+  belongs to the next compaction goal.
 - There is no Bloom filter. SSTable decoded blocks have an in-memory bounded
   LRU cache (8 MiB by default; `Options::block_cache_bytes = 0` disables it).
   The cache is not persistent and only stores successfully validated blocks.
@@ -428,6 +453,9 @@ The follow-up work is split into independently verifiable Codex goals in
 Goal 1's fixed-Linux profile, raw before/after JSON, cache accounting, and
 concurrency result are in
 [`docs/performance/read-path-2026-09-07.md`](docs/performance/read-path-2026-09-07.md).
+Goal 2's bounded asynchronous-write design, two fixed-Linux raw JSON runs,
+latency/stall/RSS evidence, and failure boundary are in
+[`docs/performance/write-path-2026-09-07.md`](docs/performance/write-path-2026-09-07.md).
 The baseline is descriptive and is not yet a CI performance gate.
 The completed Linux run passed 97/97 tests in Debug, ASan/UBSan, and Clang TSan,
 plus the Release build and deployment smoke test. Recreate it with

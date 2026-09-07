@@ -115,8 +115,8 @@ Result<ManifestSnapshot> ManifestCodec::Decode(std::span<const std::byte> bytes)
     return Status::Corruption("manifest framing is invalid");
 
   const auto payload = bytes.subspan(kManifestHeaderBytes);
-  const auto actual_crc = version == kVersion1 ? Crc32c(payload)
-                                                : Crc32c(bytes.first(12), payload);
+  const auto actual_crc =
+      version == kVersion1 ? Crc32c(payload) : Crc32c(bytes.first(12), payload);
   if (actual_crc != crc)
     return Status::Corruption("manifest checksum mismatch");
 

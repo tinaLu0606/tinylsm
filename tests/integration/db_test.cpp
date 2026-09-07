@@ -392,7 +392,8 @@ TEST(BlockCacheTest, CompactionDropsOldTableEntriesBeforeReadersChange) {
   batch.Put("a", std::string(20, 'a'));
   batch.Put("m", std::string(20, 'm'));
   ASSERT_TRUE(opened.value()->Write(batch).ok());
-  ASSERT_TRUE(tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
+  ASSERT_TRUE(
+      tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
   ASSERT_TRUE(opened.value()->Get("a").ok());
   const auto before = opened.value()->GetReadMetrics();
   ASSERT_GT(before.cache_charge_bytes, 0U);
@@ -973,7 +974,8 @@ TEST(DBTest, RepeatedFlushPreservesNewestValuesAcrossReopen) {
   ASSERT_TRUE(opened.ok()) << opened.status().message();
 
   auto expect_manifest = [&](std::size_t table_count, std::uint64_t last_sequence) {
-    ASSERT_TRUE(tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
+    ASSERT_TRUE(
+        tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
     auto fs = tinylsm::internal::NewPosixFileSystem();
     auto manifest = tinylsm::internal::ManifestState::Load(*fs, dir.path());
     ASSERT_TRUE(manifest.ok()) << manifest.status().ToString();

@@ -1,0 +1,58 @@
++ cmake --preset benchmark
+Preset CMake variables:
+
+  BUILD_TESTING:BOOL="FALSE"
+  CMAKE_BUILD_TYPE="Release"
+  CMAKE_EXPORT_COMPILE_COMMANDS:BOOL="TRUE"
+  TINYLSM_BENCHMARK_LEVELDB:BOOL="TRUE"
+  TINYLSM_BUILD_BENCHMARKS:BOOL="TRUE"
+  TINYLSM_BUILD_TOOLS:BOOL="FALSE"
+
+-- 
+-- 29.3.0
+-- Google Benchmark version: v1.9.5, normalized to 1.9.5
+-- Configuring done (0.2s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/tina.guest/tinylsm-goal2-daebc4a/build/benchmark
++ cmake --build --preset benchmark
+[1/2] Building CXX object benchmarks/CMakeFiles/tinylsm_bench.dir/db_benchmark.cpp.o
+[2/2] Linking CXX executable benchmarks/tinylsm_bench
++ /home/tina.guest/tinylsm-goal2-daebc4a/build/benchmark/benchmarks/tinylsm_bench --benchmark_filter=\^TinyLSM/WriteFlushLatency\(Async\|Sync\)/ --benchmark_out=/home/tina.guest/tinylsm-goal2-results/run3/write-goal2.json --benchmark_out_format=json --benchmark_report_aggregates_only=true --benchmark_display_aggregates_only=true --benchmark_enable_random_interleaving=true
+2026-09-07T23:40:07+08:00
+Running /home/tina.guest/tinylsm-goal2-daebc4a/build/benchmark/benchmarks/tinylsm_bench
+Run on (4 X 48 MHz CPU s)
+Load Average: 0.62, 1.77, 2.13
+-----------------------------------------------------------------------------------------------------------------------------------
+Benchmark                                                                         Time             CPU   Iterations UserCounters...
+-----------------------------------------------------------------------------------------------------------------------------------
+TinyLSM/WriteFlushLatencyAsync/iterations:1/repeats:5/manual_time_mean    832315120 ns    309145747 ns            5 background_flushes=134 background_queue_depth_max=1 bytes_per_second=31.1973Mi/s flush_stall_ns=392.76M items_per_second=120.267k/s memtable_rotations=134 operations=100k ops_per_second=120.267k/s put_p50_us=2.4724 put_p95_us=5.2932 put_p99_us=6.6486 wal_syncs=0
+TinyLSM/WriteFlushLatencyAsync/iterations:1/repeats:5/manual_time_median  812678200 ns    309289398 ns            5 background_flushes=134 background_queue_depth_max=1 bytes_per_second=31.9191Mi/s flush_stall_ns=382.064M items_per_second=123.05k/s memtable_rotations=134 operations=100k ops_per_second=123.05k/s put_p50_us=2.46 put_p95_us=5.294 put_p99_us=6.525 wal_syncs=0
+TinyLSM/WriteFlushLatencyAsync/iterations:1/repeats:5/manual_time_stddev   29712421 ns      3444862 ns            5 background_flushes=1.11622u background_queue_depth_max=8.33n bytes_per_second=1.09461Mi/s flush_stall_ns=28.3247M items_per_second=4.21977k/s memtable_rotations=1.11622u operations=833u ops_per_second=4.21977k/s put_p50_us=0.0196799 put_p95_us=0.0283055 put_p99_us=0.315508 wal_syncs=0
+TinyLSM/WriteFlushLatencyAsync/iterations:1/repeats:5/manual_time_cv           3.57 %          1.11 %             5 background_flushes=0.00% background_queue_depth_max=0.00% bytes_per_second=3.51% flush_stall_ns=7.21% items_per_second=3.51% memtable_rotations=0.00% operations=0.00% ops_per_second=3.51% put_p50_us=0.80% put_p95_us=0.53% put_p99_us=4.75% wal_syncs=0.00%
+TinyLSM/WriteFlushLatencySync/iterations:1/repeats:5/manual_time_mean    4111024013 ns    345836468 ns            5 background_flushes=26 background_queue_depth_max=1 bytes_per_second=1.26498Mi/s flush_stall_ns=40.2461M items_per_second=4.87659k/s memtable_rotations=26 operations=20k ops_per_second=4.87659k/s put_p50_us=185.651 put_p95_us=216.761 put_p99_us=284.672 wal_syncs=20k
+TinyLSM/WriteFlushLatencySync/iterations:1/repeats:5/manual_time_median  4188172159 ns    343519928 ns            5 background_flushes=26 background_queue_depth_max=1 bytes_per_second=1.23872Mi/s flush_stall_ns=45.4413M items_per_second=4.77535k/s memtable_rotations=26 operations=20k ops_per_second=4.77535k/s put_p50_us=184.517 put_p95_us=218.366 put_p99_us=275.763 wal_syncs=20k
+TinyLSM/WriteFlushLatencySync/iterations:1/repeats:5/manual_time_stddev   222820193 ns      5367024 ns            5 background_flushes=216.58n background_queue_depth_max=8.33n bytes_per_second=71.1829Ki/s flush_stall_ns=9.97199M items_per_second=267.983/s memtable_rotations=216.58n operations=166.6u ops_per_second=267.983/s put_p50_us=2.05574 put_p95_us=7.27523 put_p99_us=31.2679 wal_syncs=166.6u
+TinyLSM/WriteFlushLatencySync/iterations:1/repeats:5/manual_time_cv            5.42 %          1.55 %             5 background_flushes=0.00% background_queue_depth_max=0.00% bytes_per_second=5.50% flush_stall_ns=24.78% items_per_second=5.50% memtable_rotations=0.00% operations=0.00% ops_per_second=5.50% put_p50_us=1.11% put_p95_us=3.36% put_p99_us=10.98% wal_syncs=0.00%
+	Command being timed: "./run benchmark -- --benchmark_filter=^TinyLSM/WriteFlushLatency(Async|Sync)/ --benchmark_out=/home/tina.guest/tinylsm-goal2-results/run3/write-goal2.json --benchmark_out_format=json --benchmark_report_aggregates_only=true --benchmark_display_aggregates_only=true --benchmark_enable_random_interleaving=true"
+	User time (seconds): 5.83
+	System time (seconds): 1.98
+	Percent of CPU this job got: 29%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:26.18
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 333572
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 163448
+	Voluntary context switches: 370852
+	Involuntary context switches: 51
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 1536616
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0

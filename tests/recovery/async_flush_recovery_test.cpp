@@ -26,7 +26,8 @@ TEST(AsyncFlushRecoveryTest, BackgroundFailureIsStickyAndImmutableWalRecovers) {
   plan->Fail(FaultOperation::kOpenWritable, ".sst.tmp");
 
   auto opened = tinylsm::internal::DBTestPeer::Open(
-      dir.path(), AsyncFlushOptions(), tinylsm::test::NewFaultInjectionFileSystem(plan));
+      dir.path(), AsyncFlushOptions(),
+      tinylsm::test::NewFaultInjectionFileSystem(plan));
   ASSERT_TRUE(opened.ok()) << opened.status().ToString();
 
   // Rotation durably publishes WAL 1 as immutable and WAL 2 as active before

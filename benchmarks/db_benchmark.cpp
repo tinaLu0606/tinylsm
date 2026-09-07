@@ -807,8 +807,8 @@ const bool registered = [] {
       ->Iterations(1)
       ->Repetitions(5)
       ->UseManualTime();
-  benchmark::RegisterBenchmark("TinyLSM/WriteFlushLatencySync", WriteFlushLatency,
-                               true, 20'000, 256, 256U * 1024U)
+  benchmark::RegisterBenchmark("TinyLSM/WriteFlushLatencySync", WriteFlushLatency, true,
+                               20'000, 256, 256U * 1024U)
       ->Iterations(1)
       ->Repetitions(5)
       ->UseManualTime();

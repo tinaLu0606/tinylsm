@@ -141,10 +141,12 @@ TEST(CleanupRecoveryTest, FlushRetriesPendingWalRemoval) {
   plan->Fail(FaultOperation::kRemove, "000001.wal");
 
   ASSERT_TRUE(opened.value()->Put("first", "value").ok());
-  ASSERT_TRUE(tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
+  ASSERT_TRUE(
+      tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
   EXPECT_TRUE(std::filesystem::exists(dir.path() / "000001.wal"));
   ASSERT_TRUE(opened.value()->Put("second", "value").ok());
-  ASSERT_TRUE(tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
+  ASSERT_TRUE(
+      tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
   EXPECT_FALSE(std::filesystem::exists(dir.path() / "000001.wal"));
   EXPECT_EQ(opened.value()->Get("first").value(), "value");
   EXPECT_EQ(opened.value()->Get("second").value(), "value");

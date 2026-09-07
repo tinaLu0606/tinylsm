@@ -175,14 +175,17 @@ TEST(FlushRecoveryTest, SecondFlushFailuresKeepPublishedTableAndWalRecoverable) 
         dir.path(), FlushOptions(), tinylsm::test::NewFaultInjectionFileSystem(plan));
     ASSERT_TRUE(opened.ok()) << opened.status().ToString();
     ASSERT_TRUE(opened.value()->Put("old", std::string(64, 'o')).ok());
-    ASSERT_TRUE(tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
+    ASSERT_TRUE(
+        tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
     plan->Fail(fault.operation, fault.suffix, 1, fault.timing);
 
     auto status = opened.value()->Put("new", std::string(64, 'n'));
     EXPECT_TRUE(status.ok());
-    EXPECT_EQ(tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).code(),
+    EXPECT_EQ(
+        tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).code(),
+        tinylsm::StatusCode::kIOError);
+    EXPECT_EQ(opened.value()->Get("old").status().code(),
               tinylsm::StatusCode::kIOError);
-    EXPECT_EQ(opened.value()->Get("old").status().code(), tinylsm::StatusCode::kIOError);
 
     auto real_fs = tinylsm::internal::NewPosixFileSystem();
     auto manifest = tinylsm::internal::ManifestState::Load(*real_fs, dir.path());
@@ -205,7 +208,8 @@ TEST(FlushRecoveryTest, ManifestSyncDirFailureFreezesDataOperationsUntilReopen) 
       dir.path(), FlushOptions(), tinylsm::test::NewFaultInjectionFileSystem(plan));
   ASSERT_TRUE(opened.ok()) << opened.status().ToString();
   ASSERT_TRUE(opened.value()->Put("old", std::string(64, 'o')).ok());
-  ASSERT_TRUE(tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
+  ASSERT_TRUE(
+      tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
   plan->Fail(FaultOperation::kSyncDir);
 
   const auto status = opened.value()->Put("key", std::string(256, 'v'));
