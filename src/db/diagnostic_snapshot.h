@@ -40,8 +40,8 @@ struct DiagnosticSnapshot {
   std::optional<Status> terminal_error;
 };
 
-/// Internal bridge used by the Lab server. Callers must synchronize access to
-/// the non-thread-safe DB before requesting a snapshot.
+/// Internal bridge used by the Lab server. Snapshot() takes the same internal
+/// mutex as public DB operations and returns an independent copy.
 class DBLabPeer {
 public:
   static Result<DiagnosticSnapshot> Snapshot(const DB& db);

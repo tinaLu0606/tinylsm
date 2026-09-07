@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <span>
 
 #include "io/file.h"
 #include "model/internal_entry.h"
@@ -15,6 +16,7 @@ public:
 
   /// Encodes and appends one complete record; durability requires Sync().
   Status Append(const InternalEntry& entry);
+  Status AppendBatch(std::span<const InternalEntry> entries);
   Status Sync() { return file_->Sync(); }
   Status Close() { return file_->Close(); }
 

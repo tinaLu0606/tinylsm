@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <barrier>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -9,6 +10,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <unistd.h>
 #include <utility>
 
@@ -449,6 +451,191 @@ TEST(DBTest, EnforcesKeyAndValueLimitsBeforeWalAndMemtableMutation) {
             tinylsm::StatusCode::kNotFound);
   EXPECT_EQ(opened.value()->Get("new").status().code(), tinylsm::StatusCode::kNotFound);
   EXPECT_EQ(opened.value()->Get("key").value(), "data");
+}
+
+TEST(DBTest, WriteBatchPreservesOrderAndRecoversAsOneRecord) {
+  TempDir dir;
+  {
+    auto opened = tinylsm::DB::Open(dir.path());
+    ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+    tinylsm::WriteBatch empty;
+    EXPECT_TRUE(opened.value()->Write(empty).ok());
+
+    tinylsm::WriteBatch batch;
+    batch.Put("a", "old");
+    batch.Put("b", "two");
+    batch.Delete("a");
+    batch.Put("a", "new");
+    ASSERT_TRUE(opened.value()->Write(batch).ok());
+    EXPECT_EQ(opened.value()->Get("a").value(), "new");
+    EXPECT_EQ(opened.value()->Get("b").value(), "two");
+  }
+
+  auto reopened = tinylsm::DB::Open(dir.path());
+  ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
+  EXPECT_EQ(reopened.value()->Get("a").value(), "new");
+  EXPECT_EQ(reopened.value()->Get("b").value(), "two");
+}
+
+TEST(DBTest, WriteBatchFlushesOnlyAfterTheWholeBatchIsApplied) {
+  TempDir dir;
+  tinylsm::Options options;
+  options.memtable_bytes = 1;
+  {
+    auto opened = tinylsm::DB::Open(dir.path(), options);
+    ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+    tinylsm::WriteBatch batch;
+    batch.Put("a", "one");
+    batch.Put("b", "two");
+    batch.Delete("a");
+    ASSERT_TRUE(opened.value()->Write(batch).ok());
+    EXPECT_EQ(opened.value()->Get("a").status().code(), tinylsm::StatusCode::kNotFound);
+    EXPECT_EQ(opened.value()->Get("b").value(), "two");
+  }
+
+  auto reopened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
+  EXPECT_EQ(reopened.value()->Get("a").status().code(), tinylsm::StatusCode::kNotFound);
+  EXPECT_EQ(reopened.value()->Get("b").value(), "two");
+}
+
+TEST(DBTest, ConcurrentCallersAreSerializedWithoutLosingWrites) {
+  TempDir dir;
+  tinylsm::Options options;
+  options.sync_on_write = false;
+  options.memtable_bytes = 32U * 1024U;
+  auto opened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+  constexpr std::size_t kThreads = 8;
+  constexpr std::size_t kWritesPerThread = 200;
+  std::barrier start(kThreads);
+  std::vector<std::thread> threads;
+  std::vector<tinylsm::Status> statuses(kThreads);
+  threads.reserve(kThreads);
+  for (std::size_t thread = 0; thread < kThreads; ++thread) {
+    threads.emplace_back([&, thread] {
+      start.arrive_and_wait();
+      for (std::size_t index = 0; index < kWritesPerThread; ++index) {
+        const auto key =
+            "thread-" + std::to_string(thread) + "-key-" + std::to_string(index);
+        statuses[thread] = opened.value()->Put(key, "value-" + std::to_string(index));
+        if (!statuses[thread].ok())
+          return;
+        auto read = opened.value()->Get(key);
+        if (!read.ok()) {
+          statuses[thread] = read.status();
+          return;
+        }
+      }
+    });
+  }
+  for (auto& thread : threads)
+    thread.join();
+  for (const auto& status : statuses)
+    ASSERT_TRUE(status.ok()) << status.ToString();
+
+  auto scan = opened.value()->Scan({}, {});
+  ASSERT_TRUE(scan.ok()) << scan.status().ToString();
+  EXPECT_EQ(scan.value().size(), kThreads * kWritesPerThread);
+}
+
+TEST(DBTest, IncompleteWalBatchIsDiscardedInFull) {
+  TempDir dir;
+  {
+    auto opened = tinylsm::DB::Open(dir.path());
+    ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+    tinylsm::WriteBatch batch;
+    batch.Put("a", "one");
+    batch.Put("b", "two");
+    ASSERT_TRUE(opened.value()->Write(batch).ok());
+    ASSERT_TRUE(opened.value()->Close().ok());
+  }
+
+  const auto wal = dir.path() / "000001.wal";
+  const auto complete_size = std::filesystem::file_size(wal);
+  ASSERT_GT(complete_size, 1U);
+  std::filesystem::resize_file(wal, complete_size - 1);
+
+  auto reopened = tinylsm::DB::Open(dir.path());
+  ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
+  EXPECT_EQ(reopened.value()->Get("a").status().code(), tinylsm::StatusCode::kNotFound);
+  EXPECT_EQ(reopened.value()->Get("b").status().code(), tinylsm::StatusCode::kNotFound);
+  EXPECT_EQ(std::filesystem::file_size(wal), 0U);
+}
+
+TEST(DBTest, InvalidWriteBatchChangesNeitherWalNorMemtable) {
+  TempDir dir;
+  tinylsm::Options options;
+  options.max_key_bytes = 3;
+  options.max_value_bytes = 4;
+  auto opened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+  tinylsm::WriteBatch batch;
+  batch.Put("ok", "data");
+  batch.Put("long", "data");
+  const auto wal = dir.path() / "000001.wal";
+  const auto original_size = std::filesystem::file_size(wal);
+  EXPECT_EQ(opened.value()->Write(batch).code(), tinylsm::StatusCode::kInvalidArgument);
+  EXPECT_EQ(std::filesystem::file_size(wal), original_size);
+  EXPECT_EQ(opened.value()->Get("ok").status().code(), tinylsm::StatusCode::kNotFound);
+}
+
+TEST(DBErrorTest, WriteBatchSyncFailureIsUnconfirmedButFullyRecoverable) {
+  TempDir dir;
+  auto plan = std::make_shared<tinylsm::test::FaultPlan>();
+  auto opened = tinylsm::internal::DBTestPeer::Open(
+      dir.path(), {}, tinylsm::test::NewFaultInjectionFileSystem(plan));
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+  tinylsm::WriteBatch batch;
+  batch.Put("a", "one");
+  batch.Put("b", "two");
+  plan->Fail(FaultOperation::kSync, "000001.wal");
+  EXPECT_EQ(opened.value()->Write(batch).code(), tinylsm::StatusCode::kIOError);
+  EXPECT_EQ(opened.value()->Get("a").status().code(), tinylsm::StatusCode::kNotFound);
+  EXPECT_EQ(opened.value()->Get("b").status().code(), tinylsm::StatusCode::kNotFound);
+  opened.value().reset();
+
+  auto reopened = tinylsm::DB::Open(dir.path());
+  ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
+  EXPECT_EQ(reopened.value()->Get("a").value(), "one");
+  EXPECT_EQ(reopened.value()->Get("b").value(), "two");
+}
+
+TEST(DBErrorTest, WriteBatchAppendFailureNeverPartiallyApplies) {
+  for (const auto timing : {FaultTiming::kBefore, FaultTiming::kAfter}) {
+    SCOPED_TRACE(timing == FaultTiming::kBefore ? "before" : "after");
+    TempDir dir;
+    auto plan = std::make_shared<tinylsm::test::FaultPlan>();
+    auto opened = tinylsm::internal::DBTestPeer::Open(
+        dir.path(), {}, tinylsm::test::NewFaultInjectionFileSystem(plan));
+    ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+    tinylsm::WriteBatch batch;
+    batch.Put("a", "one");
+    batch.Put("b", "two");
+    plan->Fail(FaultOperation::kAppend, "000001.wal", 1, timing);
+    EXPECT_EQ(opened.value()->Write(batch).code(), tinylsm::StatusCode::kIOError);
+    EXPECT_EQ(opened.value()->Get("a").status().code(), tinylsm::StatusCode::kNotFound);
+    EXPECT_EQ(opened.value()->Get("b").status().code(), tinylsm::StatusCode::kNotFound);
+    opened.value().reset();
+
+    auto reopened = tinylsm::DB::Open(dir.path());
+    ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
+    if (timing == FaultTiming::kBefore) {
+      EXPECT_EQ(reopened.value()->Get("a").status().code(),
+                tinylsm::StatusCode::kNotFound);
+      EXPECT_EQ(reopened.value()->Get("b").status().code(),
+                tinylsm::StatusCode::kNotFound);
+    } else {
+      EXPECT_EQ(reopened.value()->Get("a").value(), "one");
+      EXPECT_EQ(reopened.value()->Get("b").value(), "two");
+    }
+  }
 }
 
 TEST(DBTest, PreservesBinaryKeysValuesAndBytewiseScanOrderAcrossReopen) {

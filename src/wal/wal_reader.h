@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 
 #include "io/file.h"
 #include "model/internal_entry.h"
@@ -31,7 +32,7 @@ public:
   /// I/O errors fail replay without modifying the file.
   Result<WalReplayResult>
   Replay(std::uint64_t sequence_floor,
-         const std::function<Status(const InternalEntry&)>& apply);
+         const std::function<Status(std::span<const InternalEntry>)>& apply);
 
 private:
   std::unique_ptr<SequentialFile> file_;

@@ -2,6 +2,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -25,6 +26,7 @@ public:
                                             std::unique_ptr<internal::FileSystem> fs);
   Status Put(std::string_view key, std::string_view value);
   Status Delete(std::string_view key);
+  Status Write(const WriteBatch& batch);
   Result<std::string> Get(std::string_view key) const;
   Result<std::vector<Entry>> Scan(std::string_view begin, std::string_view end) const;
   Status Compact();
@@ -46,7 +48,8 @@ private:
 
   /// Performs the WAL-first write path and may synchronously trigger a flush.
   /// A flush error can occur after the record was accepted earlier.
-  Status Write(std::string_view key, std::string_view value, internal::ValueType type);
+  Status WriteEntry(std::string_view key, std::string_view value,
+                    internal::ValueType type);
 
   /// Appends one SSTable and publishes a replacement WAL. Manifest publication
   /// is the commit point; later in-memory switching and cleanup cannot fail the write.
@@ -71,6 +74,7 @@ private:
   std::vector<std::filesystem::path> pending_cleanup_;
   std::uint64_t next_sequence_ = 1;
   bool closed_ = false;
+  mutable std::mutex mutex_;
 };
 
 } // namespace tinylsm

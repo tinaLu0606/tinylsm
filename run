@@ -18,7 +18,9 @@ Commands:
   format [--check]     Format sources or verify formatting
   lint [preset]        Run clang-tidy using the preset compilation database
   asan                 Build and test with ASan + UBSan
+  tsan                 Build and test with ThreadSanitizer
   release              Configure and build the release preset
+  benchmark [-- args]  Build and run the Release benchmark suite
   clean [preset]       Run the generator's clean target
   package              Package when install/CPack support is implemented
   help                 Show this message
@@ -75,6 +77,18 @@ run_lab() {
   run_command "${executable}" --static-dir "${ui_dir}/dist" "$@"
 }
 
+run_benchmark() {
+  build benchmark
+  local executable="${TINYLSM_ROOT}/build/benchmark/benchmarks/tinylsm_bench"
+  if [[ ! -x "${executable}" ]]; then
+    die "tinylsm_bench is unavailable after the benchmark build"
+  fi
+  if [[ "${1:-}" == "--" ]]; then
+    shift
+  fi
+  run_command "${executable}" "$@"
+}
+
 main() {
   require_command cmake
 
@@ -108,8 +122,14 @@ main() {
     asan)
       test_project dev-asan-ubsan
       ;;
+    tsan)
+      test_project dev-tsan
+      ;;
     release)
       build release
+      ;;
+    benchmark)
+      run_benchmark "$@"
       ;;
     clean)
       local preset="${1:-dev-debug}"

@@ -1,0 +1,41 @@
+# Fixed ARM64 VM used for TinyLSM Linux correctness and baseline measurements.
+# The image URL and digest intentionally identify one Ubuntu 24.04 release.
+minimumLimaVersion: 2.2.0
+
+vmType: vz
+arch: aarch64
+cpus: 4
+memory: 8GiB
+disk: 40GiB
+
+images:
+  - location: https://cloud-images.ubuntu.com/releases/noble/release-20260705/ubuntu-24.04-server-cloudimg-arm64.img
+    arch: aarch64
+    digest: sha256:7df0201546f75b8bcc1044594c806c35749421ad3c9bc1be2a3ab806cfae39cc
+
+# Build inside the guest disk instead of a host mount. This keeps filesystem and
+# durability behavior Linux-native and avoids benchmarking a shared filesystem.
+mounts: []
+containerd:
+  system: false
+  user: false
+
+provision:
+  - mode: system
+    script: |
+      #!/usr/bin/env bash
+      set -euxo pipefail
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update
+      apt-get install -y --no-install-recommends \
+        build-essential \
+        ca-certificates \
+        clang \
+        cmake \
+        git \
+        libclang-rt-18-dev \
+        libgtest-dev \
+        libprotobuf-dev \
+        ninja-build \
+        protobuf-compiler \
+        rsync

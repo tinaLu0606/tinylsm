@@ -36,12 +36,33 @@
       }
     },
     {
+      "name": "dev-tsan",
+      "displayName": "Developer ThreadSanitizer",
+      "inherits": "dev-debug",
+      "cacheVariables": {
+        "TINYLSM_ENABLE_TSAN": true,
+        "TINYLSM_FETCH_TEST_DEPS": true
+      }
+    },
+    {
       "name": "release",
       "displayName": "Release",
       "inherits": "base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "BUILD_TESTING": false
+      }
+    },
+    {
+      "name": "benchmark",
+      "displayName": "Release Benchmarks",
+      "inherits": "base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BUILD_TESTING": false,
+        "TINYLSM_BUILD_TOOLS": false,
+        "TINYLSM_BUILD_BENCHMARKS": true,
+        "TINYLSM_BENCHMARK_LEVELDB": true
       }
     }
   ],
@@ -55,8 +76,16 @@
       "configurePreset": "dev-asan-ubsan"
     },
     {
+      "name": "dev-tsan",
+      "configurePreset": "dev-tsan"
+    },
+    {
       "name": "release",
       "configurePreset": "release"
+    },
+    {
+      "name": "benchmark",
+      "configurePreset": "benchmark"
     }
   ],
   "testPresets": [
@@ -70,6 +99,13 @@
     {
       "name": "dev-asan-ubsan",
       "configurePreset": "dev-asan-ubsan",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "dev-tsan",
+      "configurePreset": "dev-tsan",
       "output": {
         "outputOnFailure": true
       }

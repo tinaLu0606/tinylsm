@@ -9,6 +9,7 @@
 #include "tinylsm/options.h"
 #include "tinylsm/result.h"
 #include "tinylsm/types.h"
+#include "tinylsm/write_batch.h"
 
 namespace tinylsm {
 
@@ -19,8 +20,9 @@ class DBLabPeer;
 
 /// A movable, non-copyable key-value database handle.
 ///
-/// Keys and values are arbitrary byte strings. DB instances are not thread-safe;
-/// callers must provide external synchronization when sharing an instance.
+/// Keys and values are arbitrary byte strings. Public operations on one DB
+/// instance are internally serialized and may be called from multiple threads.
+/// Moving or destroying an instance still requires exclusive ownership.
 /// Expected database failures use Status/Result. Standard-library and dependency
 /// exceptions, including std::bad_alloc, may propagate through this interface.
 class DB final {
@@ -65,6 +67,14 @@ public:
   /// delete was accepted by an earlier stage of the write path. A persistence
   /// error can require closing and reopening the DB before further operations.
   Status Delete(std::string_view key);
+
+  /// Atomically appends and applies every operation in the batch.
+  ///
+  /// A complete batch is recovered in full after a crash. An incomplete final
+  /// WAL batch is discarded in full. Operations retain insertion order, so the
+  /// last operation for a repeated key wins. An empty batch is a successful
+  /// no-op.
+  Status Write(const WriteBatch& batch);
 
   /// Returns live entries in byte-wise key order over the range [begin, end).
   ///

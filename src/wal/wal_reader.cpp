@@ -25,7 +25,7 @@ Result<std::size_t> ReadUpTo(SequentialFile& file, std::span<std::byte> dst) {
 
 Result<WalReplayResult>
 WalReader::Replay(std::uint64_t sequence_floor,
-                  const std::function<Status(const InternalEntry&)>& apply) {
+                  const std::function<Status(std::span<const InternalEntry>)>& apply) {
   WalReplayResult result;
   std::uint64_t previous_sequence = sequence_floor;
   while (true) {
@@ -47,11 +47,12 @@ WalReader::Replay(std::uint64_t sequence_floor,
     GetFixed16(header, 4, version);
     GetFixed32(header, 8, payload_size);
 
-    if (magic != kWalMagic || version != kWalVersion)
+    if (magic != kWalMagic || (version != kWalVersion && version != kWalBatchVersion))
       return Status::Corruption("invalid WAL record in the middle of the log");
     const std::uint64_t max_payload =
-        static_cast<std::uint64_t>(kWalPayloadHeaderSize) + limits_.max_key_bytes +
-        limits_.max_value_bytes;
+        version == kWalVersion ? static_cast<std::uint64_t>(kWalPayloadHeaderSize) +
+                                     limits_.max_key_bytes + limits_.max_value_bytes
+                               : kMaxWalBatchBytes;
     if (payload_size > max_payload)
       return Status::Corruption("WAL payload exceeds decode limits");
 
@@ -65,16 +66,27 @@ WalReader::Replay(std::uint64_t sequence_floor,
       return result;
     }
 
-    auto decoded = DecodeWalRecord(record, limits_);
-    if (!decoded.ok())
-      return decoded.status();
-    if (decoded.value().sequence <= previous_sequence)
-      return Status::Corruption("WAL sequence did not strictly increase");
-    Status status = apply(decoded.value());
-    if (!status.ok())
-      return status;
-
-    previous_sequence = decoded.value().sequence;
+    if (version == kWalVersion) {
+      auto decoded = DecodeWalRecord(record, limits_);
+      if (!decoded.ok())
+        return decoded.status();
+      if (decoded.value().sequence <= previous_sequence)
+        return Status::Corruption("WAL sequence did not strictly increase");
+      Status status = apply(std::span(&decoded.value(), 1));
+      if (!status.ok())
+        return status;
+      previous_sequence = decoded.value().sequence;
+    } else {
+      auto decoded = DecodeWalBatch(record, limits_);
+      if (!decoded.ok())
+        return decoded.status();
+      if (decoded.value().front().sequence <= previous_sequence)
+        return Status::Corruption("WAL batch sequence did not strictly increase");
+      Status status = apply(decoded.value());
+      if (!status.ok())
+        return status;
+      previous_sequence = decoded.value().back().sequence;
+    }
     result.max_sequence = previous_sequence;
     result.valid_bytes += record.size();
   }

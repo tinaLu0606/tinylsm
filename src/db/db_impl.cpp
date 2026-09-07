@@ -227,10 +227,10 @@ Status DB::Impl::RecoverActiveWal(const internal::ManifestSnapshot& snapshot) {
     return seq.status().WithContext("open active WAL for replay");
 
   internal::WalReader reader(std::move(seq.value()), Limits(options_));
-  auto replay =
-      reader.Replay(snapshot.last_sequence, [&](const internal::InternalEntry& e) {
-        return memtable_.Apply(e);
-      });
+  auto replay = reader.Replay(snapshot.last_sequence,
+                              [&](std::span<const internal::InternalEntry> entries) {
+                                return memtable_.ApplyBatch(entries);
+                              });
   if (!replay.ok())
     return replay.status().WithContext("replay active WAL");
 
@@ -259,13 +259,15 @@ Status DB::Impl::CheckOpen() const {
   return terminal_error_.value_or(Status::Ok());
 }
 Status DB::Impl::Put(std::string_view k, std::string_view v) {
-  return Write(k, v, internal::ValueType::kValue);
+  std::scoped_lock lock(mutex_);
+  return WriteEntry(k, v, internal::ValueType::kValue);
 }
 Status DB::Impl::Delete(std::string_view k) {
-  return Write(k, {}, internal::ValueType::kTombstone);
+  std::scoped_lock lock(mutex_);
+  return WriteEntry(k, {}, internal::ValueType::kTombstone);
 }
-Status DB::Impl::Write(std::string_view key, std::string_view value,
-                       internal::ValueType type) {
+Status DB::Impl::WriteEntry(std::string_view key, std::string_view value,
+                            internal::ValueType type) {
   auto open = CheckOpen();
   if (!open.ok())
     return open;
@@ -308,6 +310,62 @@ Status DB::Impl::Write(std::string_view key, std::string_view value,
     if (!s.ok())
       return s;
   }
+  return Status::Ok();
+}
+
+Status DB::Impl::Write(const WriteBatch& batch) {
+  std::scoped_lock lock(mutex_);
+  auto open = CheckOpen();
+  if (!open.ok())
+    return open;
+  if (batch.Empty())
+    return Status::Ok();
+  if (batch.Count() > internal::kMaxWalBatchOperations ||
+      batch.Count() > std::numeric_limits<std::uint64_t>::max() - next_sequence_) {
+    return Status::ResourceExhausted("batch exceeds sequence or operation limit");
+  }
+
+  std::vector<internal::InternalEntry> entries;
+  entries.reserve(batch.Count());
+  std::uint64_t sequence = next_sequence_;
+  std::size_t added_bytes = 0;
+  for (const auto& operation : batch.Operations()) {
+    if (operation.key.size() > options_.max_key_bytes ||
+        operation.value.size() > options_.max_value_bytes) {
+      return Status::InvalidArgument("batch key or value exceeds configured limit");
+    }
+    const auto bytes =
+        sizeof(internal::InternalEntry) + operation.key.size() + operation.value.size();
+    if (bytes > std::numeric_limits<std::size_t>::max() - added_bytes)
+      return Status::ResourceExhausted("batch size accounting overflow");
+    added_bytes += bytes;
+
+    const auto type = operation.type == WriteBatch::OperationType::kPut
+                          ? internal::ValueType::kValue
+                          : internal::ValueType::kTombstone;
+    entries.push_back({operation.key, sequence++, type, operation.value});
+  }
+  if (added_bytes > internal::kMaxWalBatchBytes)
+    return Status::InvalidArgument("batch exceeds encoded size limit");
+
+  if (wal_) {
+    auto status = wal_->AppendBatch(entries);
+    if (!status.ok())
+      return status;
+    if (options_.sync_on_write) {
+      status = wal_->Sync();
+      if (!status.ok())
+        return status;
+    }
+  }
+
+  next_sequence_ = sequence;
+  auto status = memtable_.ApplyBatch(entries);
+  if (!status.ok())
+    return status;
+
+  if (manifest_ && memtable_.ApproximateMemoryUsage() >= options_.memtable_bytes)
+    return FlushMemTable();
   return Status::Ok();
 }
 
@@ -411,6 +469,7 @@ Status DB::Impl::FlushMemTable() {
 }
 
 Result<std::string> DB::Impl::Get(std::string_view key) const {
+  std::scoped_lock lock(mutex_);
   auto s = CheckOpen();
   if (!s.ok())
     return s;
@@ -447,6 +506,7 @@ Result<std::string> DB::Impl::Get(std::string_view key) const {
 }
 Result<std::vector<Entry>> DB::Impl::Scan(std::string_view begin,
                                           std::string_view end) const {
+  std::scoped_lock lock(mutex_);
   auto s = CheckOpen();
   if (!s.ok())
     return s;
@@ -494,6 +554,7 @@ Result<std::vector<Entry>> DB::Impl::Scan(std::string_view begin,
 }
 
 Status DB::Impl::Compact() {
+  std::scoped_lock lock(mutex_);
   auto open = CheckOpen();
   if (!open.ok())
     return open;
@@ -714,6 +775,7 @@ void DB::Impl::CleanupObsoleteFiles() noexcept {
 }
 
 Status DB::Impl::Close() {
+  std::scoped_lock lock(mutex_);
   if (closed_)
     return Status::AlreadyClosed("database is closed");
 

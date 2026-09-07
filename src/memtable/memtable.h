@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <map>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -19,6 +20,9 @@ public:
   /// Inserts or replaces an entry. A replacement's sequence must strictly
   /// increase; tombstones remain stored so they can hide older disk values.
   Status Apply(InternalEntry entry);
+  /// Applies a validated sequence atomically with respect to allocation
+  /// failures: all required map nodes are staged before entries_ is changed.
+  Status ApplyBatch(std::span<const InternalEntry> entries);
   [[nodiscard]] Result<InternalEntry> Get(std::string_view key) const;
 
   [[nodiscard]] Result<std::unique_ptr<InternalIterator>>

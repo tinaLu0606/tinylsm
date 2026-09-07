@@ -1,6 +1,7 @@
 #include "memtable/memtable.h"
 
 #include <cassert>
+#include <limits>
 #include <utility>
 
 namespace tinylsm::internal {
@@ -55,6 +56,48 @@ Status MemTable::Apply(InternalEntry entry) {
     std::string key = entry.user_key;
     entries_.emplace(std::move(key), std::move(entry));
   }
+  return Status::Ok();
+}
+
+Status MemTable::ApplyBatch(std::span<const InternalEntry> entries) {
+  if (entries.empty())
+    return Status::Ok();
+
+  std::uint64_t previous_sequence = 0;
+  std::map<std::string, InternalEntry, BytewiseLess> staged;
+  for (const auto& entry : entries) {
+    if (entry.sequence == 0 ||
+        (previous_sequence != 0 && entry.sequence <= previous_sequence)) {
+      return Status::Corruption("memtable batch sequence did not increase");
+    }
+    staged.insert_or_assign(entry.user_key, entry);
+    previous_sequence = entry.sequence;
+  }
+
+  std::size_t next_bytes = bytes_;
+  for (const auto& [key, entry] : staged) {
+    const auto existing = entries_.find(key);
+    if (existing != entries_.end())
+      next_bytes -= EntryBytes(existing->second);
+    const auto added = EntryBytes(entry);
+    if (added > std::numeric_limits<std::size_t>::max() - next_bytes)
+      return Status::ResourceExhausted("memtable batch size overflow");
+    next_bytes += added;
+    if (existing != entries_.end() && entry.sequence <= existing->second.sequence) {
+      return Status::Corruption("memtable batch sequence did not increase");
+    }
+  }
+
+  while (!staged.empty()) {
+    auto node = staged.extract(staged.begin());
+    auto existing = entries_.find(node.key());
+    if (existing == entries_.end()) {
+      entries_.insert(std::move(node));
+    } else {
+      existing->second = std::move(node.mapped());
+    }
+  }
+  bytes_ = next_bytes;
   return Status::Ok();
 }
 

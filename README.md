@@ -7,10 +7,10 @@ publication.
 
 The project is intentionally small enough to inspect end to end. It is a
 learning-oriented prototype rather than a production database. The current
-write path supports repeated synchronous flushes into an ordered set of
-SSTables, range scans lazily merge those tables, and callers can explicitly run
-synchronous full compaction. The V3 storage lifecycle is complete; concurrent
-access is not implemented.
+write path supports atomic write batches and repeated synchronous flushes into
+an ordered set of SSTables, range scans lazily merge those tables, and callers
+can explicitly run synchronous full compaction. Public operations on one DB
+handle are serialized internally so the handle can be shared by callers.
 
 ## Quick start
 
@@ -40,6 +40,7 @@ Run the sanitizer configuration:
 
 ```sh
 ./run asan
+./run tsan
 ```
 
 `run` is the repository's Bash entry point. It translates short developer
@@ -141,14 +142,19 @@ steps.
 | `./run format [--check]` | Apply or verify `clang-format` |
 | `./run lint [preset]` | Run `clang-tidy` with the preset compilation database |
 | `./run asan` | Build and test with AddressSanitizer and UBSan |
+| `./run tsan` | Build and test with ThreadSanitizer |
 | `./run release` | Build the Release preset |
+| `./run benchmark [-- <args>]` | Build and run the pinned Release benchmark suite |
 | `./run clean [preset]` | Clean the selected build tree |
 
 Available CMake presets are:
 
 - `dev-debug`: Debug build with tools and tests.
 - `dev-asan-ubsan`: Debug build with AddressSanitizer and UndefinedBehaviorSanitizer.
+- `dev-tsan`: Debug build with ThreadSanitizer.
 - `release`: optimized build without the test targets.
+- `benchmark`: optimized benchmark build with pinned Google Benchmark and,
+  by default, pinned LevelDB comparison targets.
 
 The `package` command is reserved for future install/CPack support and currently
 reports that packaging is not implemented.
@@ -156,8 +162,8 @@ reports that packaging is not implemented.
 ## Public C++ API
 
 The public interface is deliberately small: `Open`, `Put`, `Get`, `Delete`,
-`Scan`, `Compact`, and `Close`. Expected storage failures are returned through
-`Status` and `Result<T>` instead of exceptions.
+atomic `Write`, `Scan`, `Compact`, and `Close`. Expected storage failures are
+returned through `Status` and `Result<T>` instead of exceptions.
 
 ```cpp
 #include <iostream>
@@ -190,12 +196,26 @@ int main() {
 ```
 
 Keys and values are byte strings. Database handles are movable but non-copyable
-and are not thread-safe; callers must synchronize shared access externally.
+and public operations on the same handle are internally serialized. Moving or
+destroying a handle still requires exclusive ownership.
+
+`WriteBatch` groups several ordered `Put`/`Delete` operations into one WAL
+record and one optional WAL sync. Recovery applies a complete record in full
+and discards an incomplete final record in full, so a crash cannot expose half
+of the batch. This is atomicity, not isolation across multiple DB handles and
+not rollback-capable transactions.
+
+```cpp
+tinylsm::WriteBatch batch;
+batch.Put("account:a", "90");
+batch.Put("account:b", "110");
+auto status = db->Write(batch);
+```
 
 ## Implemented scope
 
-- WAL-first `Put` and `Delete`, with optional per-write synchronization and
-  repeated synchronous MemTable flushes.
+- WAL-first `Put`, `Delete`, and atomic `WriteBatch`, with optional per-write or
+  per-batch synchronization and repeated synchronous MemTable flushes.
 - An ordered MemTable that keeps the newest sequence for each user key.
 - Immutable, block-indexed SSTables with CRC32C integrity checks and complete
   validation of Manifest-referenced table data during startup.
@@ -209,8 +229,10 @@ and are not thread-safe; callers must synchronize shared access externally.
   successful recovery and at later maintenance checkpoints.
 - Detection of malformed records, truncated data, checksum failures, invalid
   ordering, missing files, and size mismatches.
+- Serialized public DB operations with concurrent integration coverage.
 - Unit, integration, CLI, fault-injection, and recovery tests, plus ASan/UBSan
-  test builds.
+  and TSan test builds.
+- A Release benchmark suite with fixed workloads and a pinned LevelDB adapter.
 
 ## Architecture
 
@@ -268,12 +290,12 @@ The main modules are:
 ### Write path
 
 ```text
-Put/Delete
+Put/Delete or WriteBatch
     -> validate sizes and allocate a sequence number
-    -> append InternalEntry to WAL
+    -> append one complete record to WAL
     -> optionally fsync WAL
-    -> apply entry to MemTable
-    -> flush when the configured memory threshold is reached
+    -> apply one entry or the complete batch to MemTable
+    -> flush after the operation/batch when the memory threshold is reached
 ```
 
 Every delete is stored as a tombstone rather than removing older bytes in place.
@@ -360,6 +382,11 @@ Checksums detect accidental corruption in encoded WAL records, SSTable blocks,
 and persisted metadata. Structural validation separately checks lengths, file
 boundaries, ordering, indexes, and sequence metadata.
 
+The WAL reader accepts the original version-1 single-operation records and the
+version-2 batch record. A batch contains consecutive sequence numbers and one
+checksum covering its complete payload; mixed old and new records can therefore
+be recovered during an in-place format transition.
+
 Manifest version 2 stores live tables in oldest-to-newest order and protects the
 header plus Protobuf payload with CRC32C. The reader also accepts fixed version-1
 zero-table and single-table snapshots. Because the current SSTable format has no
@@ -374,9 +401,22 @@ TinyLSM currently favors clarity and testability over feature breadth:
   automatic trigger, background worker, or multi-level layout.
 - There is no Bloom filter or block cache.
 - Flushes are synchronous; there is no immutable-MemTable/background worker.
-- There is no transaction, write batch, snapshot, or concurrent writer support.
+- DB operations use one global mutex; there is no parallel read path, group
+  commit, snapshot, or general multi-record transaction/rollback facility.
 - The POSIX filesystem path is the implemented persistent backend.
 - Packaging and installation rules are not implemented yet.
 
 These constraints keep the durability boundary, recovery rules, and on-disk
 formats visible while leaving clear next steps toward a fuller LSM engine.
+
+## Performance baseline
+
+The reproducible Release workloads, raw JSON output, macOS pre/post comparison,
+same-machine Linux/LevelDB results, and fixed Lima VM definition are documented in
+[`docs/performance/baseline-2026-09-06.md`](docs/performance/baseline-2026-09-06.md).
+The baseline is descriptive and is not yet a CI performance gate.
+The completed Linux run passed 97/97 tests in Debug, ASan/UBSan, and Clang TSan,
+plus the Release build and deployment smoke test. Recreate it with
+`tools/vm/tinylsm-linux.yaml`, then run `./scripts/run_linux_baseline.sh` inside
+the VM to retain the environment, test logs, Release build log, complete
+benchmark JSON, and verification evidence in one output directory.

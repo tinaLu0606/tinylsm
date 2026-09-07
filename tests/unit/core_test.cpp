@@ -151,6 +151,96 @@ TEST(WalCodecTest, HasStableHeaderAndRejectsCorruptionAndLimits) {
             tinylsm::StatusCode::kCorruption);
 }
 
+TEST(WalBatchCodecTest, RoundTripsAndRejectsDamageLimitsAndSequenceGaps) {
+  const std::vector<ti::InternalEntry> entries{{"a", 7, ti::ValueType::kValue, "one"},
+                                               {"b", 8, ti::ValueType::kTombstone, ""},
+                                               {"a", 9, ti::ValueType::kValue, "new"}};
+  auto encoded = ti::EncodeWalBatch(entries, {});
+  ASSERT_TRUE(encoded.ok()) << encoded.status().ToString();
+
+  std::uint16_t version = 0;
+  ASSERT_TRUE(ti::GetFixed16(ti::AsBytes(encoded.value()), 4, version));
+  EXPECT_EQ(version, ti::kWalBatchVersion);
+  auto decoded = ti::DecodeWalBatch(ti::AsBytes(encoded.value()), {});
+  ASSERT_TRUE(decoded.ok()) << decoded.status().ToString();
+  EXPECT_EQ(decoded.value(), entries);
+
+  for (const std::size_t offset : {0U, 4U, 6U, 7U, 8U, 12U, 20U}) {
+    SCOPED_TRACE(offset);
+    std::string corrupt = encoded.value();
+    corrupt[offset] ^= 1;
+    EXPECT_EQ(ti::DecodeWalBatch(ti::AsBytes(corrupt), {}).status().code(),
+              tinylsm::StatusCode::kCorruption);
+  }
+  EXPECT_EQ(ti::DecodeWalBatch(ti::AsBytes(encoded.value()), {0, 8}).status().code(),
+            tinylsm::StatusCode::kCorruption);
+
+  auto gap = entries;
+  gap[1].sequence = 10;
+  EXPECT_EQ(ti::EncodeWalBatch(gap, {}).status().code(),
+            tinylsm::StatusCode::kInvalidArgument);
+  EXPECT_EQ(ti::EncodeWalBatch({}, {}).status().code(),
+            tinylsm::StatusCode::kInvalidArgument);
+}
+
+TEST(WalReaderTest, ReplaysMixedSingleAndBatchRecordsAtomically) {
+  auto single = ti::EncodeWalRecord({"a", 7, ti::ValueType::kValue, "old"}, {});
+  const std::vector<ti::InternalEntry> batch{{"a", 8, ti::ValueType::kValue, "new"},
+                                             {"b", 9, ti::ValueType::kValue, "two"}};
+  auto encoded_batch = ti::EncodeWalBatch(batch, {});
+  const std::vector<ti::InternalEntry> tail{{"c", 10, ti::ValueType::kValue, "three"},
+                                            {"d", 11, ti::ValueType::kValue, "four"}};
+  auto encoded_tail = ti::EncodeWalBatch(tail, {});
+  ASSERT_TRUE(single.ok());
+  ASSERT_TRUE(encoded_batch.ok());
+  ASSERT_TRUE(encoded_tail.ok());
+
+  const std::string log =
+      single.value() + encoded_batch.value() + encoded_tail.value().substr(0, 23);
+  ti::WalReader reader(std::make_unique<StringSequentialFile>(log, 5), {});
+  std::vector<ti::InternalEntry> applied;
+  std::vector<std::size_t> callback_sizes;
+  auto replay = reader.Replay(0, [&](std::span<const ti::InternalEntry> entries) {
+    callback_sizes.push_back(entries.size());
+    applied.insert(applied.end(), entries.begin(), entries.end());
+    return tinylsm::Status::Ok();
+  });
+
+  ASSERT_TRUE(replay.ok()) << replay.status().ToString();
+  EXPECT_TRUE(replay.value().truncated_tail);
+  EXPECT_EQ(replay.value().valid_bytes,
+            single.value().size() + encoded_batch.value().size());
+  EXPECT_EQ(replay.value().max_sequence, 9U);
+  EXPECT_EQ(callback_sizes, (std::vector<std::size_t>{1, 2}));
+  ASSERT_EQ(applied.size(), 3U);
+  EXPECT_EQ(applied[1], batch[0]);
+  EXPECT_EQ(applied[2], batch[1]);
+}
+
+TEST(WalReaderTest, DiscardsEveryIncompleteBatchPrefixWithoutCallingApply) {
+  const std::vector<ti::InternalEntry> batch{{"a", 1, ti::ValueType::kValue, "one"},
+                                             {"b", 2, ti::ValueType::kTombstone, ""},
+                                             {"c", 3, ti::ValueType::kValue, "three"}};
+  auto encoded = ti::EncodeWalBatch(batch, {});
+  ASSERT_TRUE(encoded.ok()) << encoded.status().ToString();
+
+  for (std::size_t length = 1; length < encoded.value().size(); ++length) {
+    SCOPED_TRACE(length);
+    const auto prefix = encoded.value().substr(0, length);
+    ti::WalReader reader(std::make_unique<StringSequentialFile>(prefix, prefix.size()),
+                         {});
+    std::size_t callback_count = 0;
+    auto replay = reader.Replay(0, [&](std::span<const ti::InternalEntry>) {
+      ++callback_count;
+      return tinylsm::Status::Ok();
+    });
+    ASSERT_TRUE(replay.ok()) << replay.status().ToString();
+    EXPECT_TRUE(replay.value().truncated_tail);
+    EXPECT_EQ(replay.value().valid_bytes, 0U);
+    EXPECT_EQ(callback_count, 0U);
+  }
+}
+
 TEST(WalReaderTest, ReplaysValidPrefixAndClassifiesTruncatedTail) {
   auto first = ti::EncodeWalRecord({"a", 7, ti::ValueType::kValue, "one"}, {});
   auto second = ti::EncodeWalRecord({"b", 9, ti::ValueType::kValue, "two"}, {});
@@ -159,8 +249,8 @@ TEST(WalReaderTest, ReplaysValidPrefixAndClassifiesTruncatedTail) {
   std::string log = first.value() + second.value().substr(0, 5);
   ti::WalReader reader(std::make_unique<StringSequentialFile>(log, 3), {});
   std::vector<ti::InternalEntry> applied;
-  auto replay = reader.Replay(0, [&](const ti::InternalEntry& entry) {
-    applied.push_back(entry);
+  auto replay = reader.Replay(0, [&](std::span<const ti::InternalEntry> entries) {
+    applied.insert(applied.end(), entries.begin(), entries.end());
     return tinylsm::Status::Ok();
   });
   ASSERT_TRUE(replay.ok());
@@ -174,7 +264,7 @@ TEST(WalReaderTest, ReplaysValidPrefixAndClassifiesTruncatedTail) {
   ti::WalReader corrupt_reader(
       std::make_unique<StringSequentialFile>(corrupt, corrupt.size()), {});
   auto corrupt_result = corrupt_reader.Replay(
-      0, [](const ti::InternalEntry&) { return tinylsm::Status::Ok(); });
+      0, [](std::span<const ti::InternalEntry>) { return tinylsm::Status::Ok(); });
   EXPECT_EQ(corrupt_result.status().code(), tinylsm::StatusCode::kCorruption);
 }
 
@@ -195,8 +285,8 @@ TEST(WalReaderTest, EnforcesPublishedFloorAndStrictlyIncreasingSequence) {
   auto valid_log = make_log({8, 10, 13});
   ti::WalReader valid_reader(
       std::make_unique<StringSequentialFile>(valid_log, valid_log.size()), {});
-  auto valid = valid_reader.Replay(7, [&](const ti::InternalEntry& entry) {
-    applied.push_back(entry);
+  auto valid = valid_reader.Replay(7, [&](std::span<const ti::InternalEntry> entries) {
+    applied.insert(applied.end(), entries.begin(), entries.end());
     return tinylsm::Status::Ok();
   });
   ASSERT_TRUE(valid.ok()) << valid.status().ToString();
@@ -217,8 +307,8 @@ TEST(WalReaderTest, EnforcesPublishedFloorAndStrictlyIncreasingSequence) {
     }
     std::size_t callback_count = 0;
     ti::WalReader reader(std::make_unique<StringSequentialFile>(log, log.size()), {});
-    auto replay = reader.Replay(floor, [&](const ti::InternalEntry&) {
-      ++callback_count;
+    auto replay = reader.Replay(floor, [&](std::span<const ti::InternalEntry> entries) {
+      callback_count += entries.size();
       return tinylsm::Status::Ok();
     });
     EXPECT_EQ(replay.status().code(), tinylsm::StatusCode::kCorruption);
