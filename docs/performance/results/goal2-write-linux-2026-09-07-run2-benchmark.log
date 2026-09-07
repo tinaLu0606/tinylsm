@@ -8,7 +8,7 @@ Preset CMake variables:
   TINYLSM_BUILD_BENCHMARKS:BOOL="TRUE"
   TINYLSM_BUILD_TOOLS:BOOL="FALSE"
 
--- 
+--
 -- 29.3.0
 -- Google Benchmark version: v1.9.5, normalized to 1.9.5
 -- Configuring done (0.2s)
