@@ -271,8 +271,9 @@ void WriteFlushLatency(benchmark::State& state, bool sync, std::uint64_t count,
     const auto started = Clock::now();
     for (std::uint64_t i = 0; i < count; ++i) {
       const auto operation_started = Clock::now();
-      if (!db->Put(Key(i), Value(i, value_bytes)).ok()) {
-        state.SkipWithError("put failed");
+      const auto status = db->Put(Key(i), Value(i, value_bytes));
+      if (!status.ok()) {
+        state.SkipWithError(status.ToString().c_str());
         return;
       }
       latencies.push_back(
@@ -802,12 +803,12 @@ const bool registered = [] {
   RegisterCommon("LevelDB", EngineKind::kLevelDb);
 #endif
   benchmark::RegisterBenchmark("TinyLSM/WriteFlushLatencyAsync", WriteFlushLatency,
-                               false, 10'000, 256, 64U * 1024U)
+                               false, 100'000, 256, 256U * 1024U)
       ->Iterations(1)
       ->Repetitions(5)
       ->UseManualTime();
   benchmark::RegisterBenchmark("TinyLSM/WriteFlushLatencySync", WriteFlushLatency,
-                               true, 2'000, 256, 64U * 1024U)
+                               true, 20'000, 256, 256U * 1024U)
       ->Iterations(1)
       ->Repetitions(5)
       ->UseManualTime();
