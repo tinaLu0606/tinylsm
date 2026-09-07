@@ -212,17 +212,20 @@ private:
 
 void FaultPlan::Fail(FaultOperation operation, std::string path_suffix,
                      std::size_t occurrence, FaultTiming timing) {
+  std::scoped_lock lock(mutex_);
   rules_.push_back({operation, std::move(path_suffix), occurrence, timing, false, 0});
 }
 
 void FaultPlan::Throw(FaultOperation operation, std::string path_suffix,
                       std::size_t occurrence, FaultTiming timing) {
+  std::scoped_lock lock(mutex_);
   rules_.push_back({operation, std::move(path_suffix), occurrence, timing, true, 0});
 }
 
 std::optional<Status> FaultPlan::MaybeFail(FaultOperation operation,
                                            const std::filesystem::path& path,
                                            FaultTiming timing) {
+  std::scoped_lock lock(mutex_);
   const auto text = path.generic_string();
   for (auto& rule : rules_) {
     if (rule.operation != operation || rule.timing != timing ||

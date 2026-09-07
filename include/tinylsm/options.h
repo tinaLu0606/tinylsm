@@ -7,7 +7,8 @@ namespace tinylsm {
 
 /// Configuration used when opening a persistent database.
 struct Options {
-  /// Approximate MemTable size in bytes that triggers a synchronous flush.
+  /// Approximate active MemTable size in bytes that triggers rotation to the
+  /// one bounded immutable MemTable and a background flush.
   /// Must be non-zero.
   std::size_t memtable_bytes = 4U * 1024U * 1024U;
 

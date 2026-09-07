@@ -78,6 +78,7 @@ TEST(DBCompactionTest, RewritesOneTableWithoutChangingTheActiveWal) {
   auto opened = tinylsm::DB::Open(dir.path(), FlushEveryWriteOptions());
   ASSERT_TRUE(opened.ok()) << opened.status().ToString();
   ASSERT_TRUE(opened.value()->Put("key", "value").ok());
+  ASSERT_TRUE(tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
   auto before = LoadManifest(dir.path());
   ASSERT_TRUE(before.ok());
   ASSERT_EQ(before.value().live_tables.size(), 1U);
@@ -101,6 +102,7 @@ TEST(DBCompactionTest, DropsAllTombstonesWithoutConsumingAFileNumber) {
   auto opened = tinylsm::DB::Open(dir.path(), FlushEveryWriteOptions());
   ASSERT_TRUE(opened.ok()) << opened.status().ToString();
   ASSERT_TRUE(opened.value()->Delete("gone").ok());
+  ASSERT_TRUE(tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
   auto before = LoadManifest(dir.path());
   ASSERT_TRUE(before.ok());
   ASSERT_EQ(before.value().live_tables.size(), 1U);

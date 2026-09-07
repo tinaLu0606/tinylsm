@@ -362,7 +362,7 @@ TEST(ManifestCodecTest, ReadsFixedVersionOneGoldenFiles) {
       (ti::ManifestSnapshot{7, 11, 42, {ti::TableMeta{9, 100, "a", "z", 1, 42}}}));
 }
 
-TEST(ManifestCodecTest, WritesVersionTwoAndPreservesMultipleTableOrder) {
+TEST(ManifestCodecTest, WritesVersionThreeAndPreservesMultipleTableOrder) {
   const std::vector<ti::ManifestSnapshot> snapshots{
       {1, 2, 0, {}},
       {7, 10, 2, {{2, 100, "a", "z", 1, 2}}},
@@ -379,7 +379,7 @@ TEST(ManifestCodecTest, WritesVersionTwoAndPreservesMultipleTableOrder) {
 
     std::uint16_t version = 0;
     ASSERT_TRUE(ti::GetFixed16(ti::AsBytes(encoded.value()), 4, version));
-    EXPECT_EQ(version, 2U);
+    EXPECT_EQ(version, 3U);
     EXPECT_FALSE(LegacyV1FrameGateAccepts(encoded.value()));
 
     auto decoded = ti::ManifestCodec::Decode(ti::AsBytes(encoded.value()));
@@ -402,8 +402,8 @@ TEST(ManifestCodecTest, RejectsFramingChecksumAndUnknownFieldDamage) {
   }
 
   std::string top_level_unknown = ManifestPayload(encoded.value());
-  top_level_unknown.append("\x28\x01", 2);
-  auto top_level = ManifestFrame(2, top_level_unknown);
+  top_level_unknown.append("\x30\x01", 2);
+  auto top_level = ManifestFrame(3, top_level_unknown);
   EXPECT_EQ(ti::ManifestCodec::Decode(ti::AsBytes(top_level)).status().code(),
             tinylsm::StatusCode::kCorruption);
 

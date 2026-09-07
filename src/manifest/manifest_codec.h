@@ -28,6 +28,10 @@ struct ManifestSnapshot {
   std::uint64_t next_file_number = 1;
   std::uint64_t last_sequence = 0;
   std::vector<TableMeta> live_tables;
+  /// A sealed WAL paired with the one bounded immutable MemTable. Zero means
+  /// that no background flush is pending. Kept last to preserve aggregate
+  /// initialization used by version-1/version-2 format tests.
+  std::uint64_t immutable_wal_number = 0;
 
   bool operator==(const ManifestSnapshot&) const = default;
 };

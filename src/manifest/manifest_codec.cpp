@@ -15,11 +15,15 @@ namespace {
 constexpr std::uint32_t kMagic = 0x31464e4dU;
 constexpr std::uint16_t kVersion1 = 1;
 constexpr std::uint16_t kVersion2 = 2;
+constexpr std::uint16_t kVersion3 = 3;
 
 std::optional<std::string> ValidateSnapshot(const ManifestSnapshot& snapshot) {
   if (snapshot.active_wal_number == 0)
     return "manifest active WAL number is invalid";
-  if (snapshot.next_file_number <= snapshot.active_wal_number)
+  if (snapshot.immutable_wal_number == snapshot.active_wal_number)
+    return "manifest active and immutable WAL numbers collide";
+  if (snapshot.next_file_number <= snapshot.active_wal_number ||
+      snapshot.next_file_number <= snapshot.immutable_wal_number)
     return "manifest next file number is invalid";
 
   std::unordered_set<std::uint64_t> file_numbers;
@@ -29,6 +33,7 @@ std::optional<std::string> ValidateSnapshot(const ManifestSnapshot& snapshot) {
   for (std::size_t i = 0; i < snapshot.live_tables.size(); ++i) {
     const auto& table = snapshot.live_tables[i];
     if (table.file_number == 0 || table.file_number == snapshot.active_wal_number ||
+        table.file_number == snapshot.immutable_wal_number ||
         table.file_number >= snapshot.next_file_number ||
         !file_numbers.insert(table.file_number).second)
       return "manifest table file numbers are invalid";
@@ -60,6 +65,7 @@ Result<std::string> ManifestCodec::Encode(const ManifestSnapshot& s) {
 
   proto::ManifestSnapshotProto message;
   message.set_active_wal_number(s.active_wal_number);
+  message.set_immutable_wal_number(s.immutable_wal_number);
   message.set_next_file_number(s.next_file_number);
   message.set_last_sequence(s.last_sequence);
 
@@ -84,7 +90,7 @@ Result<std::string> ManifestCodec::Encode(const ManifestSnapshot& s) {
   std::string out;
   out.reserve(kManifestHeaderBytes + payload.size());
   PutFixed32(out, kMagic);
-  PutFixed16(out, kVersion2);
+  PutFixed16(out, kVersion3);
   PutFixed16(out, 0);
   PutFixed32(out, static_cast<std::uint32_t>(payload.size()));
   PutFixed32(out, Crc32c(AsBytes(out), AsBytes(payload)));
@@ -103,13 +109,14 @@ Result<ManifestSnapshot> ManifestCodec::Decode(std::span<const std::byte> bytes)
   GetFixed32(bytes, 8, size);
   GetFixed32(bytes, 12, crc);
 
-  if (magic != kMagic || (version != kVersion1 && version != kVersion2) ||
+  if (magic != kMagic ||
+      (version != kVersion1 && version != kVersion2 && version != kVersion3) ||
       reserved != 0 || size != bytes.size() - kManifestHeaderBytes)
     return Status::Corruption("manifest framing is invalid");
 
   const auto payload = bytes.subspan(kManifestHeaderBytes);
-  const auto actual_crc =
-      version == kVersion1 ? Crc32c(payload) : Crc32c(bytes.first(12), payload);
+  const auto actual_crc = version == kVersion1 ? Crc32c(payload)
+                                                : Crc32c(bytes.first(12), payload);
   if (actual_crc != crc)
     return Status::Corruption("manifest checksum mismatch");
 
@@ -123,6 +130,7 @@ Result<ManifestSnapshot> ManifestCodec::Decode(std::span<const std::byte> bytes)
 
   ManifestSnapshot s;
   s.active_wal_number = message.active_wal_number();
+  s.immutable_wal_number = version == kVersion3 ? message.immutable_wal_number() : 0;
   s.next_file_number = message.next_file_number();
   s.last_sequence = message.last_sequence();
   s.live_tables.reserve(message.live_tables_size());

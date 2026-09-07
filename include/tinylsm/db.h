@@ -8,6 +8,7 @@
 
 #include "tinylsm/options.h"
 #include "tinylsm/read_metrics.h"
+#include "tinylsm/write_metrics.h"
 #include "tinylsm/result.h"
 #include "tinylsm/types.h"
 #include "tinylsm/write_batch.h"
@@ -24,7 +25,8 @@ class DBLabPeer;
 /// Keys and values are arbitrary byte strings. Public operations on one DB
 /// instance may be called from multiple threads: Get(), Scan(), and internal
 /// diagnostic snapshots share a read lock; Put(), Delete(), Write(), Compact(),
-/// and Close() take the exclusive lock. A long Scan can therefore delay a writer.
+/// and Close() coordinate state with the exclusive lock. A long Scan can therefore
+/// delay a writer. Flush I/O runs on one background worker after MemTable rotation.
 /// Moving or destroying an instance still requires exclusive ownership.
 /// Expected database failures use Status/Result. Standard-library and dependency
 /// exceptions, including std::bad_alloc, may propagate through this interface.
@@ -88,6 +90,10 @@ public:
   /// Returns cumulative read-path and lock counters without resetting them.
   /// Metrics remain available after Close().
   [[nodiscard]] ReadMetrics GetReadMetrics() const noexcept;
+
+  /// Returns cumulative write/flush/backpressure counters without resetting them.
+  /// Metrics remain available after Close().
+  [[nodiscard]] WriteMetrics GetWriteMetrics() const noexcept;
 
   /// Rewrites all currently published SSTables into zero or one replacement.
   ///

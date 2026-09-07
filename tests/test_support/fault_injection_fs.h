@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -52,6 +53,7 @@ private:
   };
 
   std::vector<Rule> rules_;
+  std::mutex mutex_;
 };
 
 std::unique_ptr<internal::FileSystem>

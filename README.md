@@ -6,12 +6,14 @@ SSTables, manifest-based recovery, tombstones, checksums, and crash-aware file
 publication.
 
 The project is intentionally small enough to inspect end to end. It is a
-learning-oriented prototype rather than a production database. The current
-write path supports atomic write batches and repeated synchronous flushes into
-an ordered set of SSTables, range scans lazily merge those tables, and callers
-can explicitly run synchronous full compaction. `Get`, `Scan`, and diagnostic
-snapshots share a read lock; writes, compaction, and close take the exclusive
-lock, so a long Scan can delay a writer.
+learning-oriented prototype rather than a production database. The write path
+uses an active WAL/MemTable plus one bounded immutable WAL/MemTable generation:
+rotation is durable before a single background worker flushes the immutable
+generation into an ordered set of SSTables. Range scans lazily merge active
+memory, immutable memory, and tables; callers can explicitly run synchronous
+full compaction. `Get`, `Scan`, and diagnostic snapshots share a read lock;
+writes, compaction, and close coordinate state with the exclusive lock, so a
+long Scan can delay a writer.
 
 ## Quick start
 
@@ -216,16 +218,20 @@ auto status = db->Write(batch);
 ## Implemented scope
 
 - WAL-first `Put`, `Delete`, and atomic `WriteBatch`, with optional per-write or
-  per-batch synchronization and repeated synchronous MemTable flushes.
+  per-batch synchronization, active/immutable WAL rotation, and one bounded
+  background MemTable flush worker.
 - An ordered MemTable that keeps the newest sequence for each user key.
 - Immutable, block-indexed SSTables with CRC32C integrity checks and complete
   validation of Manifest-referenced table data during startup.
 - Tombstones that hide deleted values across memory and disk.
-- Half-open ordered range scans that merge MemTable and SSTable state.
+- Half-open ordered range scans that merge active MemTable, immutable MemTable,
+  and SSTable state.
 - Explicit synchronous full compaction into zero or one replacement SSTable.
-- A versioned Manifest snapshot that records the authoritative WAL, ordered
-  SSTable set, and sequence state while retaining version-1 read compatibility.
-- Startup recovery through Manifest loading and active-WAL replay.
+- A version-3 Manifest snapshot that records active and optional immutable WALs,
+  the ordered SSTable set, and sequence state while retaining version-1 and
+  version-2 read compatibility.
+- Startup recovery through Manifest loading, immutable-WAL replay, then
+  active-WAL replay.
 - Conservative orphan cleanup for canonical numbered WAL/SSTable names after
   successful recovery and at later maintenance checkpoints.
 - Detection of malformed records, truncated data, checksum failures, invalid
@@ -403,7 +409,6 @@ TinyLSM currently favors clarity and testability over feature breadth:
 - There is no Bloom filter. SSTable decoded blocks have an in-memory bounded
   LRU cache (8 MiB by default; `Options::block_cache_bytes = 0` disables it).
   The cache is not persistent and only stores successfully validated blocks.
-- Flushes are synchronous; there is no immutable-MemTable/background worker.
 - There is no group commit, snapshot isolation, or general multi-record
   transaction/rollback facility. Read operations can run concurrently, but a
   Scan holds a shared lock while materializing its result.

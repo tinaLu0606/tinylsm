@@ -20,6 +20,15 @@ public:
       return impl.status();
     return std::unique_ptr<DB>(new DB(std::move(impl.value())));
   }
+
+  /// Test-only synchronization point for a scheduled immutable flush. It does
+  /// not create a table or mutate user data beyond allowing existing work to
+  /// finish.
+  static Status WaitForBackgroundFlush(DB& db) {
+    std::unique_lock lock(db.impl_->mutex_);
+    db.impl_->WaitForBackgroundFlush(lock);
+    return db.impl_->CheckOpen();
+  }
 };
 
 } // namespace tinylsm::internal

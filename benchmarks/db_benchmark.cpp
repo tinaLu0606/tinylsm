@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <iomanip>
@@ -239,6 +240,67 @@ void SetReadMeasurements(benchmark::State& state, std::uint64_t operations,
   state.counters["cache_inserts"] = after.cache_inserts - before.cache_inserts;
   state.counters["cache_evictions"] = after.cache_evictions - before.cache_evictions;
   state.counters["cache_charge_bytes"] = after.cache_charge_bytes;
+}
+
+double Percentile(std::vector<double> samples, double percentile) {
+  if (samples.empty())
+    return 0.0;
+  const auto index = static_cast<std::size_t>(
+      std::ceil(percentile * static_cast<double>(samples.size() - 1)));
+  std::nth_element(samples.begin(), samples.begin() + index, samples.end());
+  return samples[index];
+}
+
+void WriteFlushLatency(benchmark::State& state, bool sync, std::uint64_t count,
+                       std::size_t value_bytes, std::size_t memtable_bytes) {
+  for (auto _ : state) {
+    (void)_;
+    TemporaryDirectory directory(sync ? "write-flush-sync" : "write-flush-async");
+    tinylsm::Options options;
+    options.sync_on_write = sync;
+    options.memtable_bytes = memtable_bytes;
+    auto opened = tinylsm::DB::Open(directory.path(), options);
+    if (!opened.ok()) {
+      state.SkipWithError("open failed");
+      return;
+    }
+
+    auto db = std::move(opened.value());
+    std::vector<double> latencies;
+    latencies.reserve(static_cast<std::size_t>(count));
+    const auto started = Clock::now();
+    for (std::uint64_t i = 0; i < count; ++i) {
+      const auto operation_started = Clock::now();
+      if (!db->Put(Key(i), Value(i, value_bytes)).ok()) {
+        state.SkipWithError("put failed");
+        return;
+      }
+      latencies.push_back(
+          std::chrono::duration<double, std::micro>(Clock::now() - operation_started)
+              .count());
+    }
+    const auto stopped = Clock::now();
+    if (!db->Close().ok()) {
+      state.SkipWithError("close failed");
+      return;
+    }
+    const auto metrics = db->GetWriteMetrics();
+
+    SetMeasurements(state, count, count * (16 + value_bytes),
+                    std::chrono::duration<double>(stopped - started).count());
+    state.counters["put_p50_us"] = Percentile(latencies, 0.50);
+    state.counters["put_p95_us"] = Percentile(latencies, 0.95);
+    state.counters["put_p99_us"] = Percentile(latencies, 0.99);
+    state.counters["wal_syncs"] = static_cast<double>(metrics.wal_syncs);
+    state.counters["memtable_rotations"] =
+        static_cast<double>(metrics.memtable_rotations);
+    state.counters["background_flushes"] =
+        static_cast<double>(metrics.background_flushes);
+    state.counters["background_queue_depth_max"] =
+        static_cast<double>(metrics.max_background_queue_depth);
+    state.counters["flush_stall_ns"] =
+        static_cast<double>(metrics.backpressure_wait_nanoseconds);
+  }
 }
 
 void FillSequential(benchmark::State& state, EngineKind kind, bool sync,
@@ -739,6 +801,16 @@ const bool registered = [] {
 #ifdef TINYLSM_HAVE_LEVELDB
   RegisterCommon("LevelDB", EngineKind::kLevelDb);
 #endif
+  benchmark::RegisterBenchmark("TinyLSM/WriteFlushLatencyAsync", WriteFlushLatency,
+                               false, 10'000, 256, 64U * 1024U)
+      ->Iterations(1)
+      ->Repetitions(5)
+      ->UseManualTime();
+  benchmark::RegisterBenchmark("TinyLSM/WriteFlushLatencySync", WriteFlushLatency,
+                               true, 2'000, 256, 64U * 1024U)
+      ->Iterations(1)
+      ->Repetitions(5)
+      ->UseManualTime();
   benchmark::RegisterBenchmark("TinyLSM/ReadMemTableHit", ReadMemTableHit, 25'000,
                                200'000, 100)
       ->Iterations(1)

@@ -20,6 +20,7 @@ add_executable(tinylsm_tests
   recovery/cleanup_recovery_test.cpp
   recovery/compaction_recovery_test.cpp
   recovery/flush_recovery_test.cpp
+  recovery/async_flush_recovery_test.cpp
   test_support/temp_dir.cpp
 )
 target_link_libraries(tinylsm_tests PRIVATE GTest::gtest_main)

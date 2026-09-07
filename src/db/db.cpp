@@ -23,6 +23,9 @@ Result<std::vector<Entry>> DB::Scan(std::string_view b, std::string_view e) cons
 ReadMetrics DB::GetReadMetrics() const noexcept {
   return impl_ ? impl_->GetReadMetrics() : ReadMetrics{};
 }
+WriteMetrics DB::GetWriteMetrics() const noexcept {
+  return impl_ ? impl_->GetWriteMetrics() : WriteMetrics{};
+}
 Status DB::Compact() { return impl_->Compact(); }
 Status DB::Close() { return impl_->Close(); }
 } // namespace tinylsm

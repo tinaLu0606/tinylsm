@@ -392,6 +392,7 @@ TEST(BlockCacheTest, CompactionDropsOldTableEntriesBeforeReadersChange) {
   batch.Put("a", std::string(20, 'a'));
   batch.Put("m", std::string(20, 'm'));
   ASSERT_TRUE(opened.value()->Write(batch).ok());
+  ASSERT_TRUE(tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
   ASSERT_TRUE(opened.value()->Get("a").ok());
   const auto before = opened.value()->GetReadMetrics();
   ASSERT_GT(before.cache_charge_bytes, 0U);
@@ -656,13 +657,16 @@ TEST(DBTest, AcceptsActiveWalSequenceGapsAndContinuesAfterTheMaximum) {
   EXPECT_EQ(opened.value()->Get("a").value(), "nine");
   EXPECT_EQ(opened.value()->Get("b").value(), "twelve");
   ASSERT_TRUE(opened.value()->Put("c", "thirteen").ok());
+  ASSERT_TRUE(opened.value()->Close().ok());
 
   auto published = tinylsm::internal::ManifestState::Load(*fs, dir.path());
   ASSERT_TRUE(published.ok()) << published.status().ToString();
-  ASSERT_EQ(published.value().live_tables.size(), 1U);
+  ASSERT_EQ(published.value().live_tables.size(), 2U);
   EXPECT_EQ(published.value().last_sequence, 13U);
   EXPECT_EQ(published.value().live_tables.front().min_sequence, 9U);
-  EXPECT_EQ(published.value().live_tables.front().max_sequence, 13U);
+  EXPECT_EQ(published.value().live_tables.front().max_sequence, 12U);
+  EXPECT_EQ(published.value().live_tables.back().min_sequence, 13U);
+  EXPECT_EQ(published.value().live_tables.back().max_sequence, 13U);
 }
 
 TEST(DBTest, DistinguishesMissingEmptyAndTombstone) {
@@ -969,6 +973,7 @@ TEST(DBTest, RepeatedFlushPreservesNewestValuesAcrossReopen) {
   ASSERT_TRUE(opened.ok()) << opened.status().message();
 
   auto expect_manifest = [&](std::size_t table_count, std::uint64_t last_sequence) {
+    ASSERT_TRUE(tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
     auto fs = tinylsm::internal::NewPosixFileSystem();
     auto manifest = tinylsm::internal::ManifestState::Load(*fs, dir.path());
     ASSERT_TRUE(manifest.ok()) << manifest.status().ToString();

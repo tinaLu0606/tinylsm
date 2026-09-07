@@ -122,12 +122,6 @@ TEST(ManifestPublishTest, DurablePublicationUpdatesCurrentSnapshot) {
 
 TEST(FlushRecoveryTest, PreManifestRenameFailuresKeepOldStateRecoverable) {
   const std::vector<PublishFaultCase> cases{
-      {FaultOperation::kOpenWritable, ".sst.tmp"},
-      {FaultOperation::kAppend, ".sst.tmp"},
-      {FaultOperation::kSync, ".sst.tmp"},
-      {FaultOperation::kClose, ".sst.tmp", FaultTiming::kAfter},
-      {FaultOperation::kRename, ".sst"},
-      {FaultOperation::kSyncDir, ""},
       {FaultOperation::kOpenWritable, "000003.wal"},
       {FaultOperation::kSync, "000003.wal"},
       {FaultOperation::kOpenWritable, "MANIFEST.tmp"},
@@ -171,14 +165,6 @@ TEST(FlushRecoveryTest, SecondFlushFailuresKeepPublishedTableAndWalRecoverable) 
       {FaultOperation::kOpenRandomAccess, ".sst.tmp"},
       {FaultOperation::kReadAt, ".sst.tmp"},
       {FaultOperation::kRename, ".sst"},
-      {FaultOperation::kSyncDir, ""},
-      {FaultOperation::kOpenWritable, "000005.wal"},
-      {FaultOperation::kSync, "000005.wal"},
-      {FaultOperation::kOpenWritable, "MANIFEST.tmp"},
-      {FaultOperation::kAppend, "MANIFEST.tmp"},
-      {FaultOperation::kSync, "MANIFEST.tmp"},
-      {FaultOperation::kClose, "MANIFEST.tmp", FaultTiming::kAfter},
-      {FaultOperation::kRename, "MANIFEST"},
   };
 
   for (const auto& fault : cases) {
@@ -189,19 +175,21 @@ TEST(FlushRecoveryTest, SecondFlushFailuresKeepPublishedTableAndWalRecoverable) 
         dir.path(), FlushOptions(), tinylsm::test::NewFaultInjectionFileSystem(plan));
     ASSERT_TRUE(opened.ok()) << opened.status().ToString();
     ASSERT_TRUE(opened.value()->Put("old", std::string(64, 'o')).ok());
+    ASSERT_TRUE(tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
     plan->Fail(fault.operation, fault.suffix, 1, fault.timing);
 
     auto status = opened.value()->Put("new", std::string(64, 'n'));
-    EXPECT_EQ(status.code(), tinylsm::StatusCode::kIOError);
-    EXPECT_EQ(opened.value()->Get("old").value(), std::string(64, 'o'));
-    EXPECT_EQ(opened.value()->Get("new").value(), std::string(64, 'n'));
+    EXPECT_TRUE(status.ok());
+    EXPECT_EQ(tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).code(),
+              tinylsm::StatusCode::kIOError);
+    EXPECT_EQ(opened.value()->Get("old").status().code(), tinylsm::StatusCode::kIOError);
 
     auto real_fs = tinylsm::internal::NewPosixFileSystem();
     auto manifest = tinylsm::internal::ManifestState::Load(*real_fs, dir.path());
     ASSERT_TRUE(manifest.ok()) << manifest.status().ToString();
     EXPECT_EQ(manifest.value().live_tables.size(), 1U);
 
-    EXPECT_TRUE(opened.value()->Close().ok());
+    EXPECT_EQ(opened.value()->Close().code(), tinylsm::StatusCode::kIOError);
     opened.value().reset();
     auto reopened = tinylsm::DB::Open(dir.path(), FlushOptions());
     ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
@@ -217,9 +205,10 @@ TEST(FlushRecoveryTest, ManifestSyncDirFailureFreezesDataOperationsUntilReopen) 
       dir.path(), FlushOptions(), tinylsm::test::NewFaultInjectionFileSystem(plan));
   ASSERT_TRUE(opened.ok()) << opened.status().ToString();
   ASSERT_TRUE(opened.value()->Put("old", std::string(64, 'o')).ok());
-  plan->Fail(FaultOperation::kSyncDir, "", 2);
+  ASSERT_TRUE(tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
+  plan->Fail(FaultOperation::kSyncDir);
 
-  const auto status = opened.value()->Put("key", std::string(64, 'v'));
+  const auto status = opened.value()->Put("key", std::string(256, 'v'));
   EXPECT_EQ(status.code(), tinylsm::StatusCode::kIOError);
   EXPECT_NE(status.message().find("close and reopen"), std::string::npos);
   EXPECT_EQ(opened.value()->Get("key").status().code(), tinylsm::StatusCode::kIOError);
@@ -235,7 +224,7 @@ TEST(FlushRecoveryTest, ManifestSyncDirFailureFreezesDataOperationsUntilReopen) 
   auto reopened = tinylsm::DB::Open(dir.path(), FlushOptions());
   ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
   EXPECT_EQ(reopened.value()->Get("old").value(), std::string(64, 'o'));
-  EXPECT_EQ(reopened.value()->Get("key").value(), std::string(64, 'v'));
+  EXPECT_EQ(reopened.value()->Get("key").value(), std::string(256, 'v'));
   EXPECT_EQ(reopened.value()->Get("later").status().code(),
             tinylsm::StatusCode::kNotFound);
 }
@@ -246,8 +235,8 @@ TEST(FlushRecoveryTest, TerminalCloseReportsOnlyItsOwnFailureAndCanRetry) {
   auto opened = tinylsm::internal::DBTestPeer::Open(
       dir.path(), FlushOptions(), tinylsm::test::NewFaultInjectionFileSystem(plan));
   ASSERT_TRUE(opened.ok()) << opened.status().ToString();
-  plan->Fail(FaultOperation::kSyncDir, "", 2);
-  ASSERT_EQ(opened.value()->Put("key", std::string(64, 'v')).code(),
+  plan->Fail(FaultOperation::kSyncDir);
+  ASSERT_EQ(opened.value()->Put("key", std::string(256, 'v')).code(),
             tinylsm::StatusCode::kIOError);
 
   plan->Fail(FaultOperation::kSync, "000001.wal");
