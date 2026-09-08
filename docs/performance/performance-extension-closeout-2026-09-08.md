@@ -1,6 +1,6 @@
 # TinyLSM Performance Extension Closeout
 
-状态：`核心 Goal 已完成；一项 Linux Release deployment smoke 未取证`
+状态：`Goal 1/2/3 与当前 revision Linux Release CLI smoke 已完成`
 
 本文件收束 `performance-extension-roadmap.md` 的 Goal 1-3。它是证据索引，不是将
 不同 workload 的吞吐、RSS 或 p99 汇成一个分数的综合 benchmark。
@@ -42,16 +42,29 @@ workload point-read amplification 从约 `16.4` 降到 `2.14`，但 write amplif
 这些不是未完成 bug。重新考虑它们的前提是新的目标 workload 或 profile 显示当前边界
 成为主要成本。
 
-## 保留的验收项
+## Linux Release deployment smoke
 
-原路线要求当前 revision 在干净 checkout 的固定 Linux 上完成 deployment smoke。Goal 3
-保留了带 SHA 的 source snapshot、build/test/sanitizer/benchmark 和 JSON verifier 证据，
-但没有独立的 Release CLI `put -> reopen -> get -> scan` 日志。此前基线 revision 有该类
-smoke，不能把它移植为当前 compaction revision 的事实。
+固定 Linux VM 从本地 Git bundle clone 了干净的 `746741e` checkout：环境文件记录了
+空的 `git status --short`、bundle SHA-256、Ubuntu ARM64/ext4 和工具版本。Release build
+后，独立 CLI 进程依次完成：
 
-需要严格发布/部署证明时，单独运行该 smoke 并保存环境、命令和输出；在此之前，当前
-结论是“性能扩展完成并经 Linux 综合测试”，不是“当前 revision 的 Linux deployment
-smoke 已留证”。
+```text
+put deployment linux-ok
+reopen + get deployment              -> linux-ok
+reopen + get deployment --json       -> Base64 JSON
+reopen + scan                        -> deployment<TAB>linux-ok
+reopen + scan --json                 -> Base64 JSON
+```
+
+验证日志对文本值、tab-separated Scan 行和 JSON 行都做了精确断言。证据文件为：
+
+- `results/goal3-release-smoke-linux-2026-09-08-environment.txt`
+- `results/goal3-release-smoke-linux-2026-09-08-release-build.log`
+- `results/goal3-release-smoke-linux-2026-09-08-cli-smoke.log`
+- `results/goal3-release-smoke-linux-2026-09-08-verification.log`
+
+`tools/lab_web` 在该 clean checkout 中未初始化；Release CLI 不依赖它，因此此项验证不
+代表 Lab UI 的部署验收。Lab 需要时仍应以其 submodule 为单位单独构建和验证。
 
 ## 后续触发条件
 

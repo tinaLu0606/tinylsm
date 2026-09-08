@@ -1,0 +1,10 @@
++ /home/tina.guest/tinylsm-release-smoke-746741e/build/release/tools/tinylsm_cli /home/tina.guest/tinylsm-release-smoke-results/746741e/smoke-db put deployment linux-ok
+OK
++ /home/tina.guest/tinylsm-release-smoke-746741e/build/release/tools/tinylsm_cli /home/tina.guest/tinylsm-release-smoke-results/746741e/smoke-db get deployment
+linux-ok
++ /home/tina.guest/tinylsm-release-smoke-746741e/build/release/tools/tinylsm_cli /home/tina.guest/tinylsm-release-smoke-results/746741e/smoke-db get deployment --json
+{"key_base64":"ZGVwbG95bWVudA==","value_base64":"bGludXgtb2s="}
++ /home/tina.guest/tinylsm-release-smoke-746741e/build/release/tools/tinylsm_cli /home/tina.guest/tinylsm-release-smoke-results/746741e/smoke-db scan
+deployment	linux-ok
++ /home/tina.guest/tinylsm-release-smoke-746741e/build/release/tools/tinylsm_cli /home/tina.guest/tinylsm-release-smoke-results/746741e/smoke-db scan --json
+{"key_base64":"ZGVwbG95bWVudA==","value_base64":"bGludXgtb2s="}

@@ -142,6 +142,13 @@ Release build. Each retained fixed-Linux run repeated the same three 107/107
 suites with no sanitizer report, completed the Release build, and passed
 `scripts/verify_compaction_benchmark_json.cmake`.
 
+After the two benchmark runs, a clean Git-bundle checkout of revision `746741e`
+also built Release on the fixed Linux ext4 VM and passed a CLI deployment smoke:
+`put deployment linux-ok`, separate-process reopen/get, text Scan, and Base64
+JSON Scan. The environment, build, command and assertion logs are stored as
+`results/goal3-release-smoke-linux-2026-09-08-*`. The independent Lab UI
+submodule was not initialized because this smoke validates only the Release CLI.
+
 Correctness coverage includes oldest-prefix tombstone retention, failed background
 Manifest commit followed by reopen, rename-visible/SyncDir terminal behavior,
 reader overlap with the compaction input snapshot, and a 5,000-operation mixed

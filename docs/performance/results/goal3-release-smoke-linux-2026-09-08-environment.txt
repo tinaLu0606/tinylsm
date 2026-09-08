@@ -1,0 +1,22 @@
+captured_at_utc=2026-09-08T07:45:27Z
+source_revision=746741e58d10b98331cd80ff101a569ea348ea59
+source_status_begin
+source_status_end
+source_bundle_sha256=a05aa38b1386c11c3b6d3ba13ed4f594a22337b9ffe96962f8d872114c0258f9
+submodule_status_begin
+-258590a537633af379cc0e12192b53dd24eb91f5 tools/lab_web
+submodule_status_end
+Linux lima-tinylsm-linux 6.8.0-134-generic #134-Ubuntu SMP PREEMPT_DYNAMIC Fri Jun 26 18:28:11 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+               total        used        free      shared  buff/cache   available
+Mem:           7.7Gi       446Mi       3.1Gi       996Ki       4.4Gi       7.3Gi
+Swap:             0B          0B          0B
+/dev/vda1 ext4   rw,relatime,discard,errors=remount-ro,commit=30
+c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+Copyright (C) 2023 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+cmake version 3.28.3
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+1.11.1

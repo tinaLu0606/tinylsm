@@ -3,9 +3,9 @@
 ## 文档状态
 
 - 日期：2026-09-08
-- 状态：`Goal 1/2/3 已完成；路线图已收束，保留一项当前 revision 的 Linux 部署 smoke 未取证`
+- 状态：`Goal 1/2/3 已完成；路线图与当前 revision Linux 部署 smoke 均已收束`
 - 基线提交：`16ed69f feat: finalize atomic batches and performance baseline`
-- 当前主仓库提交：`393c172 docs: record compaction Linux acceptance`
+- 当前性能范围验收提交：`746741e docs: close performance extension roadmap`
 - 基线报告：`docs/performance/baseline-2026-09-06.md`
 - 定位：三个性能 goal 的历史执行计划与证据索引；不自动派生 Goal 4
 
@@ -298,9 +298,11 @@ Goal 3：Compaction 演进
 - leveled layout 没有实现；这不是遗漏。当前结果已显示 size-tiered 的 read/table
   pressure 收益及 write-amplification 代价，尚无证据证明应引入新的 level metadata、
   overlap selection 和 scheduler。
-- 原目标中“从干净 checkout 的当前 revision Linux deployment smoke”没有保留独立
-  证据。导出 source snapshot 的 SHA、build/test/sanitizer/benchmark 证据齐全，但不应
-  把它表述成 Release CLI 部署 smoke 已完成；若需要严格逐字满足该项，应单独补跑。
+- 已从 Git bundle clone 的干净 checkout（`746741e`，工作树为空）完成固定 Linux
+  Release CLI smoke：`put -> reopen -> get -> scan`，并验证文本与 Base64 JSON 输出。
+  环境、Release build、CLI 和断言日志位于
+  `docs/performance/results/goal3-release-smoke-linux-2026-09-08-*`。Lab UI submodule
+  未初始化，但 Release CLI 不依赖它；该 smoke 不对 Lab UI 作出部署声明。
 
 ## 6. 路线图结束后的建议
 
@@ -308,9 +310,9 @@ Goal 3：Compaction 演进
 leveled layout 就自动启动下一项。它们都需要新的 workload/profile 证明，且要单独建立
 目标、验收指标和故障边界。
 
-若需要将当前 revision 作为可部署 Linux 演示版本，先补一个独立的 Release CLI smoke：
-在干净 Git checkout（含所需 submodule）内执行 `put -> reopen -> get -> scan`，保存环境和
-日志。它是目前唯一没有独立留证的原计划验收项；不改变现有性能/正确性结论。
+当前 revision 的 Release CLI smoke 已在干净 Git checkout 中留证。这个证据只覆盖 CLI
+与其 persistent database lifecycle；Lab UI 是独立 submodule，应在需要发布 Lab 时单独
+初始化、构建并验收。
 
 后续工作应先从实际使用场景或新的 profile 选择，例如高并发 writer 的 group-commit
 profile、cache 后仍昂贵的 negative lookup，或规模更大时的 compaction write cost；没有

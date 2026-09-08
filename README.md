@@ -477,8 +477,8 @@ JSON runs, tail-latency/space-amplification evidence, and acceptance results are
 Goal 2's bounded asynchronous-write design, two fixed-Linux raw JSON runs,
 latency/stall/RSS evidence, and failure boundary are in
 [`docs/performance/write-path-2026-09-07.md`](docs/performance/write-path-2026-09-07.md).
-The Goal 1-3 evidence index, conditional deferrals, and the one explicitly
-unrecorded deployment-smoke item are in
+The Goal 1-3 evidence index, conditional deferrals, and fixed-Linux Release CLI
+deployment-smoke evidence are in
 [`docs/performance/performance-extension-closeout-2026-09-08.md`](docs/performance/performance-extension-closeout-2026-09-08.md).
 The baseline is descriptive and is not yet a CI performance gate.
 The baseline's recorded Linux run passed 97/97 tests in Debug, ASan/UBSan, and
