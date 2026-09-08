@@ -2,12 +2,12 @@
 
 ## 文档状态
 
-- 日期：2026-09-07
-- 状态：`Goal 1 已完成；Goal 2/3 待执行`
+- 日期：2026-09-08
+- 状态：`Goal 1/2/3 已完成；路线图已收束，保留一项当前 revision 的 Linux 部署 smoke 未取证`
 - 基线提交：`16ed69f feat: finalize atomic batches and performance baseline`
-- 当前主仓库提交：`89813e7 fix: update TinyLSM Lab frontend`
+- 当前主仓库提交：`393c172 docs: record compaction Linux acceptance`
 - 基线报告：`docs/performance/baseline-2026-09-06.md`
-- 定位：将性能扩展划分为三个可由 Codex 一次 goal 完成的大阶段
+- 定位：三个性能 goal 的历史执行计划与证据索引；不自动派生 Goal 4
 
 原初版功能已经收口。后续路线不再拆成大量小 ticket，而是让一个 Codex goal
 负责一个完整性能主题：测量、设计、实现、故障验证、前后对比、文档和提交都在
@@ -79,6 +79,18 @@ Goal 3：Compaction 演进
 三个 goal 顺序执行。每个 goal 完成后都重新评估下一阶段，不因路线文档存在就
 自动继续。
 
+### 2026-09-08 收束总览
+
+| Goal | 已实现的最小策略 | 验收证据 | 延期/边界 |
+| --- | --- | --- | --- |
+| Goal 1 读取 | validated bounded Block Cache + shared read lock | fixed Linux 两轮 raw JSON、profile、Debug/ASan/TSan `101/101`、Release | Bloom Filter：cache 后的 negative lookup 不再由重复 decode/CRC 主导，按条件延期 |
+| Goal 2 写入 | 一个 immutable MemTable/WAL + 单 background flush worker | fixed Linux 两轮 raw JSON、Debug/ASan/TSan `102/102`、Release | Group Commit：没有 multiwriter queue profile 证明其调度/故障复杂度值得引入 |
+| Goal 3 Compaction | oldest-prefix simplified size-tiered + 单 background compaction worker | fixed Linux 两轮 raw JSON、Debug/ASan/TSan `107/107`、Release、reopen/fault/mixed workload | leveled layout：没有实现可比方案；现有策略已满足 table pressure 和前台读尾延迟目标 |
+
+三个 workload 的操作比例、计时边界和指标不同，上表只用于定位证据，不能把不同
+行的吞吐、RSS 或 p99 组成一个“总分”。跨 goal 的结论、原始数据链接和未知项见
+`docs/performance/performance-extension-closeout-2026-09-08.md`。
+
 ## 3. Goal 1：读取路径性能扩展
 
 ### 可直接创建的 Goal 目标
@@ -141,7 +153,8 @@ Goal 3：Compaction 演进
   read-lock 验收已完成；详见
   `docs/performance/read-path-2026-09-07.md`。
 - Bloom Filter 因 cache 后 negative lookup 已消除重复 decode/CRC 热点而暂不加入。
-- Goal 2 仍需用户根据本结果另行决定是否创建和执行。
+- Goal 2 已完成；其固定 Linux 验收和 Group Commit 的延期依据见
+  `docs/performance/write-path-2026-09-07.md`。
 
 ## 4. Goal 2：异步写入路径扩展
 
@@ -204,6 +217,15 @@ Goal 3：Compaction 演进
 4. 可选 group commit；
 5. Linux before/after 与文档收口。
 
+### 2026-09-07 完成记录
+
+- Manifest v3 active/immutable WAL recovery、一个有界 immutable generation 和单
+  background flush worker 已完成；故障、Close、reopen 与背压边界已覆盖。
+- fixed-Linux 两轮 raw JSON、环境、benchmark log 和 verifier 已保存；详见
+  `docs/performance/write-path-2026-09-07.md`。
+- Group Commit 没有实现。这是条件项的显式延期：当前测量没有 multiwriter queue
+  profile，不能证明新增 queue/batching 的收益足以覆盖持久化错误语义复杂度。
+
 ## 5. Goal 3：Compaction 与综合性能扩展
 
 ### 前置条件
@@ -265,12 +287,31 @@ Goal 3：Compaction 演进
 3. background compaction 与并发版本生命周期；
 4. 综合 Linux 验收、最终报告和 devlog。
 
-## 6. 当前执行建议
+### 2026-09-08 完成记录
 
-现在只创建并执行 **Goal 1：读取路径性能扩展**。
+- 最老连续前缀的 simplified size-tiered partial compaction、tombstone 安全条件、
+  有界 worker、shared reader snapshot、Manifest publication/terminal-error 边界和
+  原始 amplification/debt/tail-latency metrics 已完成。
+- fixed-Linux 两轮 raw JSON、环境和 benchmark log 已保存；三套 fixed-Linux suite
+  均为 `107/107`，Release 与 JSON verifier 通过。详见
+  `docs/performance/compaction-2026-09-08.md`。
+- leveled layout 没有实现；这不是遗漏。当前结果已显示 size-tiered 的 read/table
+  pressure 收益及 write-amplification 代价，尚无证据证明应引入新的 level metadata、
+  overlap selection 和 scheduler。
+- 原目标中“从干净 checkout 的当前 revision Linux deployment smoke”没有保留独立
+  证据。导出 source snapshot 的 SHA、build/test/sanitizer/benchmark 证据齐全，但不应
+  把它表述成 Release CLI 部署 smoke 已完成；若需要严格逐字满足该项，应单独补跑。
 
-它一次完成 benchmark 稳定化、profile、读取热点优化、条件式 Bloom Filter、并发
-读、sanitizer、Linux before/after、commits 和 devlog，范围足够形成完整成果，
-同时不会提前改变 WAL/Manifest 和后台线程模型。
+## 6. 路线图结束后的建议
 
-Goal 1 完成后查看真实结果，再决定是否创建 Goal 2；不提前把三个 goal 连续运行。
+本路线的三项实现 goal 已结束；不要因为列表中还存在 Bloom Filter、Group Commit 或
+leveled layout 就自动启动下一项。它们都需要新的 workload/profile 证明，且要单独建立
+目标、验收指标和故障边界。
+
+若需要将当前 revision 作为可部署 Linux 演示版本，先补一个独立的 Release CLI smoke：
+在干净 Git checkout（含所需 submodule）内执行 `put -> reopen -> get -> scan`，保存环境和
+日志。它是目前唯一没有独立留证的原计划验收项；不改变现有性能/正确性结论。
+
+后续工作应先从实际使用场景或新的 profile 选择，例如高并发 writer 的 group-commit
+profile、cache 后仍昂贵的 negative lookup，或规模更大时的 compaction write cost；没有
+证据前不建议直接扩展为成熟 RocksDB 式多 level 系统。
