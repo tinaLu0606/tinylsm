@@ -471,8 +471,8 @@ The follow-up work is split into independently verifiable Codex goals in
 Goal 1's fixed-Linux profile, raw before/after JSON, cache accounting, and
 concurrency result are in
 [`docs/performance/read-path-2026-09-07.md`](docs/performance/read-path-2026-09-07.md).
-Goal 3's strategy, tombstone rule, raw metric contract, and current verification
-state are in
+Goal 3's strategy decision, tombstone rule, raw metric contract, two fixed-Linux
+JSON runs, tail-latency/space-amplification evidence, and acceptance results are in
 [`docs/performance/compaction-2026-09-08.md`](docs/performance/compaction-2026-09-08.md).
 Goal 2's bounded asynchronous-write design, two fixed-Linux raw JSON runs,
 latency/stall/RSS evidence, and failure boundary are in
@@ -480,6 +480,7 @@ latency/stall/RSS evidence, and failure boundary are in
 The baseline is descriptive and is not yet a CI performance gate.
 The completed Linux run passed 97/97 tests in Debug, ASan/UBSan, and Clang TSan,
 plus the Release build and deployment smoke test. Recreate it with
-`tools/vm/tinylsm-linux.yaml`, then run `./scripts/run_linux_baseline.sh` inside
-the VM to retain the environment, test logs, Release build log, complete
-benchmark JSON, and verification evidence in one output directory.
+`tools/vm/tinylsm-linux.yaml`, then run `./scripts/run_linux_baseline.sh` or the
+Goal 3 `./scripts/run_linux_compaction_goal3.sh <output-dir>` inside the VM to
+retain the environment, test logs, Release build log, complete benchmark JSON,
+and verification evidence in one output directory.

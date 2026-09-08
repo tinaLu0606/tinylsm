@@ -1,0 +1,57 @@
++ cmake --preset benchmark
+Preset CMake variables:
+
+  BUILD_TESTING:BOOL="FALSE"
+  CMAKE_BUILD_TYPE="Release"
+  CMAKE_EXPORT_COMPILE_COMMANDS:BOOL="TRUE"
+  TINYLSM_BENCHMARK_LEVELDB:BOOL="TRUE"
+  TINYLSM_BUILD_BENCHMARKS:BOOL="TRUE"
+  TINYLSM_BUILD_TOOLS:BOOL="FALSE"
+
+--
+-- 29.3.0
+-- Google Benchmark version: v1.9.5, normalized to 1.9.5
+-- Configuring done (0.2s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/tina.guest/tinylsm-goal3-62e0496/build/benchmark
++ cmake --build --preset benchmark
+ninja: no work to do.
++ /home/tina.guest/tinylsm-goal3-62e0496/build/benchmark/benchmarks/tinylsm_bench --benchmark_filter=\^TinyLSM/CompactionMixed\(Manual\|SizeTiered\)/ --benchmark_out=/home/tina.guest/tinylsm-goal3-results/run2/compaction-goal3.json --benchmark_out_format=json --benchmark_report_aggregates_only=true --benchmark_display_aggregates_only=true --benchmark_enable_random_interleaving=true
+2026-09-08T12:03:48+08:00
+Running /home/tina.guest/tinylsm-goal3-62e0496/build/benchmark/benchmarks/tinylsm_bench
+Run on (4 X 48 MHz CPU s)
+Load Average: 2.32, 3.77, 2.82
+--------------------------------------------------------------------------------------------------------------------------------------
+Benchmark                                                                            Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------------------------------
+TinyLSM/CompactionMixedManual/iterations:1/repeats:5/manual_time_mean       1908547613 ns   1808206694 ns            5 background_compactions=0 bytes_per_second=2.66394Mi/s compaction_debt_bytes=0 compaction_debt_tables=0 compaction_input_bytes=5.59676M compaction_output_bytes=1.19172M compactions=1 flush_output_bytes=5.59676M foreground_reads=200 foreground_scans=200 foreground_writes=19.6k get_p50_us=867.304 get_p95_us=4.75591k get_p99_us=5.68787k items_per_second=10.4792k/s live_sstable_bytes=1.19172M logical_live_bytes=1.10187M logical_write_bytes=5.28M operations=20k ops_per_second=10.4792k/s point_lookups=200 put_p50_us=2.5026 put_p95_us=5.388 put_p99_us=69.0278 read_amplification=16.403 scan_p50_us=6.60421k scan_p95_us=18.1755k scan_p99_us=20.6122k scan_table_inputs=10.0332k space_amplification=1.08154 table_count=1 table_probes=3.2806k write_amplification=1.2857
+TinyLSM/CompactionMixedManual/iterations:1/repeats:5/manual_time_median     1909312728 ns   1808580672 ns            5 background_compactions=0 bytes_per_second=2.66286Mi/s compaction_debt_bytes=0 compaction_debt_tables=0 compaction_input_bytes=5.59676M compaction_output_bytes=1.19172M compactions=1 flush_output_bytes=5.59676M foreground_reads=200 foreground_scans=200 foreground_writes=19.6k get_p50_us=870.001 get_p95_us=4.74204k get_p99_us=5.67229k items_per_second=10.475k/s live_sstable_bytes=1.19172M logical_live_bytes=1.10187M logical_write_bytes=5.28M operations=20k ops_per_second=10.475k/s point_lookups=200 put_p50_us=2.503 put_p95_us=5.381 put_p99_us=67.084 read_amplification=16.405 scan_p50_us=6.5835k scan_p95_us=17.9576k scan_p99_us=20.6402k scan_table_inputs=10.035k space_amplification=1.08154 table_count=1 table_probes=3.281k write_amplification=1.2857
+TinyLSM/CompactionMixedManual/iterations:1/repeats:5/manual_time_stddev        4514121 ns      1458185 ns            5 background_compactions=0 bytes_per_second=6.45479Ki/s compaction_debt_bytes=0 compaction_debt_tables=0 compaction_input_bytes=0.046621 compaction_output_bytes=9.92706m compactions=8.33n flush_output_bytes=0.046621 foreground_reads=1.666u foreground_scans=1.666u foreground_writes=163.268u get_p50_us=11.71 get_p95_us=34.5788 get_p99_us=37.2008 items_per_second=24.7963/s live_sstable_bytes=9.92706m logical_live_bytes=9.1786m logical_write_bytes=0.0439824 operations=166.6u ops_per_second=24.7963/s point_lookups=1.666u put_p50_us=547.723u put_p95_us=0.0184932 put_p99_us=3.54911 read_amplification=0.0219659 scan_p50_us=110.832 scan_p95_us=370.895 scan_p99_us=118.333 scan_table_inputs=6.97854 space_amplification=5.06514n table_count=8.33n table_probes=4.39318 write_amplification=0
+TinyLSM/CompactionMixedManual/iterations:1/repeats:5/manual_time_cv               0.24 %          0.08 %             5 background_compactions=0.00% bytes_per_second=0.24% compaction_debt_bytes=0.00% compaction_debt_tables=0.00% compaction_input_bytes=0.00% compaction_output_bytes=0.00% compactions=0.00% flush_output_bytes=0.00% foreground_reads=0.00% foreground_scans=0.00% foreground_writes=0.00% get_p50_us=1.35% get_p95_us=0.73% get_p99_us=0.65% items_per_second=0.24% live_sstable_bytes=0.00% logical_live_bytes=0.00% logical_write_bytes=0.00% operations=0.00% ops_per_second=0.24% point_lookups=0.00% put_p50_us=0.02% put_p95_us=0.34% put_p99_us=5.14% read_amplification=0.13% scan_p50_us=1.68% scan_p95_us=2.04% scan_p99_us=0.57% scan_table_inputs=0.07% space_amplification=0.00% table_count=0.00% table_probes=0.13% write_amplification=0.00%
+TinyLSM/CompactionMixedSizeTiered/iterations:1/repeats:5/manual_time_mean   1017534282 ns    228825376 ns            5 background_compactions=33 bytes_per_second=4.99716Mi/s compaction_debt_bytes=0 compaction_debt_tables=0 compaction_input_bytes=36.2926M compaction_output_bytes=31.9976M compactions=33 flush_output_bytes=5.59676M foreground_reads=200 foreground_scans=200 foreground_writes=19.6k get_p50_us=204.207 get_p95_us=472.32 get_p99_us=628.471 items_per_second=19.6575k/s live_sstable_bytes=1.30172M logical_live_bytes=1.10187M logical_write_bytes=5.28M operations=20k ops_per_second=19.6575k/s point_lookups=200 put_p50_us=2.502 put_p95_us=5.2046 put_p99_us=27.1838 read_amplification=2.123 scan_p50_us=617.336 scan_p95_us=1.1575k scan_p99_us=1.50871k scan_table_inputs=669.8 space_amplification=1.18137 table_count=3 table_probes=424.6 write_amplification=7.12015
+TinyLSM/CompactionMixedSizeTiered/iterations:1/repeats:5/manual_time_median 1018346478 ns    228746347 ns            5 background_compactions=33 bytes_per_second=4.99263Mi/s compaction_debt_bytes=0 compaction_debt_tables=0 compaction_input_bytes=36.2926M compaction_output_bytes=31.9976M compactions=33 flush_output_bytes=5.59676M foreground_reads=200 foreground_scans=200 foreground_writes=19.6k get_p50_us=203.745 get_p95_us=496.43 get_p99_us=614.173 items_per_second=19.6397k/s live_sstable_bytes=1.30172M logical_live_bytes=1.10187M logical_write_bytes=5.28M operations=20k ops_per_second=19.6397k/s point_lookups=200 put_p50_us=2.502 put_p95_us=5.215 put_p99_us=32.734 read_amplification=2.135 scan_p50_us=616.328 scan_p95_us=1.15436k scan_p99_us=1.52606k scan_table_inputs=670 space_amplification=1.18137 table_count=3 table_probes=427 write_amplification=7.12015
+TinyLSM/CompactionMixedSizeTiered/iterations:1/repeats:5/manual_time_stddev   11888972 ns      4783930 ns            5 background_compactions=274.89n bytes_per_second=59.9899Ki/s compaction_debt_bytes=0 compaction_debt_tables=0 compaction_input_bytes=0.302318 compaction_output_bytes=0.26654 compactions=274.89n flush_output_bytes=0.046621 foreground_reads=1.666u foreground_scans=1.666u foreground_writes=163.268u get_p50_us=4.36086 get_p95_us=40.5685 get_p99_us=80.3701 items_per_second=230.453/s live_sstable_bytes=0.0108434 logical_live_bytes=9.1786m logical_write_bytes=0.0439824 operations=166.6u ops_per_second=230.453/s point_lookups=1.666u put_p50_us=707.107u put_p95_us=0.0545875 put_p99_us=11.3137 read_amplification=0.0846759 scan_p50_us=3.72461 scan_p95_us=21.1923 scan_p99_us=49.2831 scan_table_inputs=25.6457 space_amplification=6.42893n table_count=24.99n table_probes=16.9352 write_amplification=59.3108n
+TinyLSM/CompactionMixedSizeTiered/iterations:1/repeats:5/manual_time_cv           1.17 %          2.09 %             5 background_compactions=0.00% bytes_per_second=1.17% compaction_debt_bytes=0.00% compaction_debt_tables=0.00% compaction_input_bytes=0.00% compaction_output_bytes=0.00% compactions=0.00% flush_output_bytes=0.00% foreground_reads=0.00% foreground_scans=0.00% foreground_writes=0.00% get_p50_us=2.14% get_p95_us=8.59% get_p99_us=12.79% items_per_second=1.17% live_sstable_bytes=0.00% logical_live_bytes=0.00% logical_write_bytes=0.00% operations=0.00% ops_per_second=1.17% point_lookups=0.00% put_p50_us=0.03% put_p95_us=1.05% put_p99_us=41.62% read_amplification=3.99% scan_p50_us=0.60% scan_p95_us=1.83% scan_p99_us=3.27% scan_table_inputs=3.83% space_amplification=0.00% table_count=0.00% table_probes=3.99% write_amplification=0.00%
+	Command being timed: "./run benchmark -- --benchmark_filter=^TinyLSM/CompactionMixed(Manual|SizeTiered)/ --benchmark_out=/home/tina.guest/tinylsm-goal3-results/run2/compaction-goal3.json --benchmark_out_format=json --benchmark_report_aggregates_only=true --benchmark_display_aggregates_only=true --benchmark_enable_random_interleaving=true"
+	User time (seconds): 14.08
+	System time (seconds): 0.52
+	Percent of CPU this job got: 95%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:15.30
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 34304
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 5
+	Minor (reclaiming a frame) page faults: 63170
+	Voluntary context switches: 33738
+	Involuntary context switches: 171
+	Swaps: 0
+	File system inputs: 4368
+	File system outputs: 584944
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
