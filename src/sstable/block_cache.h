@@ -18,6 +18,9 @@ class ReadMetricsState {
 public:
   [[nodiscard]] ReadMetrics Snapshot() const noexcept;
 
+  std::atomic<std::uint64_t> point_lookups{0};
+  std::atomic<std::uint64_t> range_scans{0};
+  std::atomic<std::uint64_t> scan_table_inputs{0};
   std::atomic<std::uint64_t> table_probes{0};
   std::atomic<std::uint64_t> block_reads{0};
   std::atomic<std::uint64_t> block_decodes{0};

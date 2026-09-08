@@ -34,6 +34,11 @@ struct Options {
   /// Maximum logical charge of validated decoded SSTable blocks retained by
   /// this DB handle. Zero disables the Block Cache.
   std::size_t block_cache_bytes = 8U * 1024U * 1024U;
+
+  /// Number of oldest SSTables in one simplified size-tiered compaction.
+  /// Zero disables automatic background compaction; otherwise this must be at
+  /// least two. The default bounds table count by scheduling a four-table job.
+  std::size_t compaction_table_trigger = 4;
 };
 
 } // namespace tinylsm

@@ -60,6 +60,7 @@ void UpdateMaximum(std::atomic<std::size_t>& destination, std::size_t value) noe
 WriteMetrics internal::WriteMetricsState::Snapshot() const noexcept {
   return {LoadMetric(writes),
           LoadMetric(write_batches),
+          LoadMetric(logical_write_bytes),
           LoadMetric(wal_syncs),
           LoadMetric(memtable_rotations),
           LoadMetric(background_flushes),
@@ -70,6 +71,21 @@ WriteMetrics internal::WriteMetricsState::Snapshot() const noexcept {
           LoadMetric(max_background_queue_depth),
           LoadMetric(immutable_memtable_bytes),
           LoadMetric(max_immutable_memtable_bytes)};
+}
+
+CompactionMetrics internal::CompactionMetricsState::Snapshot() const noexcept {
+  return {LoadMetric(compactions),
+          LoadMetric(background_compactions),
+          LoadMetric(compaction_failures),
+          LoadMetric(compaction_input_tables),
+          LoadMetric(compaction_output_tables),
+          LoadMetric(compaction_input_bytes),
+          LoadMetric(compaction_output_bytes),
+          LoadMetric(flush_output_bytes),
+          LoadMetric(table_count),
+          LoadMetric(live_sstable_bytes),
+          LoadMetric(compaction_debt_tables),
+          LoadMetric(compaction_debt_bytes)};
 }
 
 Result<std::unique_ptr<DB::Impl>> DB::Impl::Open(const std::filesystem::path& path,
@@ -84,6 +100,9 @@ DB::Impl::Open(const std::filesystem::path& path, Options options,
     return Status::InvalidArgument("database path is empty");
   if (options.memtable_bytes == 0 || options.sstable_block_bytes == 0)
     return Status::InvalidArgument("size options must be non-zero");
+  if (options.compaction_table_trigger == 1)
+    return Status::InvalidArgument(
+        "compaction table trigger must be zero or at least two");
   if (!fs)
     return Status::InvalidArgument("filesystem is null");
 
@@ -93,6 +112,7 @@ DB::Impl::Open(const std::filesystem::path& path, Options options,
   impl->fs_ = std::move(fs);
   impl->read_metrics_ = std::make_shared<internal::ReadMetricsState>();
   impl->write_metrics_ = std::make_shared<internal::WriteMetricsState>();
+  impl->compaction_metrics_ = std::make_shared<internal::CompactionMetricsState>();
   impl->block_cache_ = std::make_shared<internal::BlockCache>(options.block_cache_bytes,
                                                               impl->read_metrics_);
 
@@ -117,6 +137,7 @@ DB::Impl::Open(const std::filesystem::path& path, Options options,
   s = impl->OpenManifestSSTables(snapshot);
   if (!s.ok())
     return s;
+  impl->UpdateCompactionGauges();
 
   s = impl->RecoverWals(snapshot);
   if (!s.ok())
@@ -238,7 +259,7 @@ Result<internal::ManifestSnapshot> DB::Impl::CreateInitialManifest() {
 }
 
 Status DB::Impl::OpenManifestSSTables(const internal::ManifestSnapshot& snapshot) {
-  std::vector<std::unique_ptr<internal::SSTableReader>> opened;
+  std::vector<std::shared_ptr<internal::SSTableReader>> opened;
   opened.reserve(snapshot.live_tables.size());
 
   for (const auto& meta : snapshot.live_tables) {
@@ -264,7 +285,8 @@ Status DB::Impl::OpenManifestSSTables(const internal::ManifestSnapshot& snapshot
       return properties.status().WithContext("validate Manifest SSTable data");
     if (!Matches(meta, properties.value()))
       return Status::Corruption("manifest SSTable metadata does not match file");
-    opened.push_back(std::move(reader.value()));
+    opened.push_back(
+        std::shared_ptr<internal::SSTableReader>(std::move(reader.value())));
   }
 
   tables_.swap(opened);
@@ -405,6 +427,8 @@ Status DB::Impl::WriteEntry(std::string_view key, std::string_view value,
     return s;
 
   write_metrics_->writes.fetch_add(1, std::memory_order_relaxed);
+  write_metrics_->logical_write_bytes.fetch_add(key.size() + value.size(),
+                                                std::memory_order_relaxed);
   if (manifest_ && memtable_.ApproximateMemoryUsage() >= options_.memtable_bytes &&
       !immutable_memtable_)
     return RotateMemTable();
@@ -429,6 +453,7 @@ Status DB::Impl::Write(const WriteBatch& batch) {
   entries.reserve(batch.Count());
   std::uint64_t sequence = next_sequence_;
   std::size_t added_bytes = 0;
+  std::uint64_t logical_bytes = 0;
   for (const auto& operation : batch.Operations()) {
     if (operation.key.size() > options_.max_key_bytes ||
         operation.value.size() > options_.max_value_bytes) {
@@ -439,6 +464,7 @@ Status DB::Impl::Write(const WriteBatch& batch) {
     if (bytes > std::numeric_limits<std::size_t>::max() - added_bytes)
       return Status::ResourceExhausted("batch size accounting overflow");
     added_bytes += bytes;
+    logical_bytes += operation.key.size() + operation.value.size();
 
     const auto type = operation.type == WriteBatch::OperationType::kPut
                           ? internal::ValueType::kValue
@@ -467,6 +493,8 @@ Status DB::Impl::Write(const WriteBatch& batch) {
 
   write_metrics_->writes.fetch_add(batch.Count(), std::memory_order_relaxed);
   write_metrics_->write_batches.fetch_add(1, std::memory_order_relaxed);
+  write_metrics_->logical_write_bytes.fetch_add(logical_bytes,
+                                                std::memory_order_relaxed);
   if (manifest_ && memtable_.ApproximateMemoryUsage() >= options_.memtable_bytes &&
       !immutable_memtable_)
     return RotateMemTable();
@@ -643,8 +671,14 @@ Status DB::Impl::FlushImmutableMemTable() {
     return published.status().WithContext("publish immutable flush MANIFEST");
   }
 
-  tables_.push_back(std::move(verified.value()));
+  tables_.push_back(
+      std::shared_ptr<internal::SSTableReader>(std::move(verified.value())));
   immutable_memtable_.reset();
+  compaction_metrics_->flush_output_bytes.fetch_add(built.value().file_size,
+                                                    std::memory_order_relaxed);
+  UpdateCompactionGauges();
+  if (NeedsBackgroundCompaction())
+    compaction_requested_ = true;
   write_metrics_->background_queue_depth.store(0, std::memory_order_relaxed);
   write_metrics_->immutable_memtable_bytes.store(0, std::memory_order_relaxed);
   lock.unlock();
@@ -653,38 +687,55 @@ Status DB::Impl::FlushImmutableMemTable() {
   return Status::Ok();
 }
 
-void DB::Impl::BackgroundFlushLoop() noexcept {
+void DB::Impl::BackgroundWorkLoop() noexcept {
   std::unique_lock lock(mutex_);
   while (true) {
-    background_cv_.wait(lock, [&] { return worker_stopping_ || flush_requested_; });
+    background_cv_.wait(lock, [&] {
+      return worker_stopping_ || flush_requested_ || compaction_requested_;
+    });
     if (worker_stopping_)
       break;
-    if (!immutable_memtable_) {
-      flush_requested_ = false;
-      continue;
-    }
+    const bool flush = flush_requested_ && immutable_memtable_;
+    const bool compact = !flush && compaction_requested_ && !closing_;
     flush_requested_ = false;
-    background_flush_running_ = true;
+    compaction_requested_ = false;
+    if (!flush && !compact)
+      continue;
+    if (flush)
+      background_flush_running_ = true;
+    else
+      background_compaction_running_ = true;
     lock.unlock();
 
     Status status;
     try {
-      status = FlushImmutableMemTable();
+      status = flush ? FlushImmutableMemTable()
+                     : CompactTablePrefix(options_.compaction_table_trigger, true);
     } catch (const std::exception& error) {
       status =
-          Status::IOError(std::string("background flush exception: ") + error.what());
+          Status::IOError(std::string("background worker exception: ") + error.what());
     } catch (...) {
-      status = Status::IOError("background flush raised an unknown exception");
+      status = Status::IOError("background worker raised an unknown exception");
     }
 
     lock.lock();
     background_flush_running_ = false;
+    background_compaction_running_ = false;
     if (!status.ok()) {
       if (!terminal_error_)
-        background_error_ = status.WithContext("background immutable flush");
-      write_metrics_->background_flush_failures.fetch_add(1, std::memory_order_relaxed);
+        background_error_ = status.WithContext(flush ? "background immutable flush"
+                                                     : "background compaction");
+      if (flush)
+        write_metrics_->background_flush_failures.fetch_add(1,
+                                                            std::memory_order_relaxed);
+      else
+        compaction_metrics_->compaction_failures.fetch_add(1,
+                                                           std::memory_order_relaxed);
     } else {
-      write_metrics_->background_flushes.fetch_add(1, std::memory_order_relaxed);
+      if (flush)
+        write_metrics_->background_flushes.fetch_add(1, std::memory_order_relaxed);
+      else if (NeedsBackgroundCompaction())
+        compaction_requested_ = true;
     }
     background_cv_.notify_all();
   }
@@ -699,10 +750,14 @@ Status DB::Impl::StartBackgroundWorker() {
       flush_requested_ = true;
       notify_worker = true;
     }
+    if (NeedsBackgroundCompaction()) {
+      compaction_requested_ = true;
+      notify_worker = true;
+    }
   }
 
   try {
-    background_worker_ = std::thread(&Impl::BackgroundFlushLoop, this);
+    background_worker_ = std::thread(&Impl::BackgroundWorkLoop, this);
   } catch (const std::exception& error) {
     return Status::ResourceExhausted(std::string("start background flush worker: ") +
                                      error.what());
@@ -730,6 +785,16 @@ void DB::Impl::WaitForBackgroundFlush(std::unique_lock<std::shared_mutex>& lock)
   });
 }
 
+void DB::Impl::WaitForBackgroundWork(std::unique_lock<std::shared_mutex>& lock) {
+  background_cv_.wait(lock, [&] {
+    return (!immutable_memtable_ && !background_flush_running_ &&
+            !background_compaction_running_ && !flush_requested_ &&
+            !compaction_requested_) ||
+           terminal_error_.has_value() || background_error_.has_value() ||
+           worker_stopping_;
+  });
+}
+
 Result<std::string> DB::Impl::Get(std::string_view key) const {
   const auto lock_started = LockClock::now();
   std::shared_lock lock(mutex_);
@@ -737,6 +802,7 @@ Result<std::string> DB::Impl::Get(std::string_view key) const {
   auto s = CheckOpen();
   if (!s.ok())
     return s;
+  read_metrics_->point_lookups.fetch_add(1, std::memory_order_relaxed);
 
   auto mem = memtable_.Get(key);
   if (mem.ok())
@@ -786,6 +852,7 @@ Result<std::vector<Entry>> DB::Impl::Scan(std::string_view begin,
   auto s = CheckOpen();
   if (!s.ok())
     return s;
+  read_metrics_->range_scans.fetch_add(1, std::memory_order_relaxed);
   const internal::BytewiseLess less;
   if (!end.empty() && less(end, begin))
     return Status::InvalidArgument("scan begin is greater than end");
@@ -804,6 +871,7 @@ Result<std::vector<Entry>> DB::Impl::Scan(std::string_view begin,
     if (!disk.ok())
       return disk.status();
     inputs.push_back(std::move(disk.value()));
+    read_metrics_->scan_table_inputs.fetch_add(1, std::memory_order_relaxed);
   }
 
   auto memory = memtable_.NewIterator(begin, end);
@@ -844,6 +912,10 @@ WriteMetrics DB::Impl::GetWriteMetrics() const noexcept {
   return write_metrics_ ? write_metrics_->Snapshot() : WriteMetrics{};
 }
 
+CompactionMetrics DB::Impl::GetCompactionMetrics() const noexcept {
+  return compaction_metrics_ ? compaction_metrics_->Snapshot() : CompactionMetrics{};
+}
+
 Status DB::Impl::Compact() {
   const auto lock_started = LockClock::now();
   std::unique_lock lock(mutex_);
@@ -852,32 +924,105 @@ Status DB::Impl::Compact() {
   if (!open.ok())
     return open;
 
-  WaitForBackgroundFlush(lock);
+  WaitForBackgroundWork(lock);
   open = CheckOpen();
   if (!open.ok())
     return open;
+  const auto input_count = tables_.size();
+  lock.unlock();
+  return CompactTablePrefix(input_count, false);
+}
 
-  const auto& current = manifest_->current();
-  if (current.live_tables.size() != tables_.size())
-    return Status::Corruption("Manifest and Reader table sets differ");
+bool DB::Impl::NeedsBackgroundCompaction() const noexcept {
+  return options_.compaction_table_trigger != 0 &&
+         tables_.size() >= options_.compaction_table_trigger;
+}
 
-  CleanupObsoleteFiles();
-  if (tables_.empty())
-    return Status::Ok();
+void DB::Impl::UpdateCompactionGauges() noexcept {
+  std::size_t live_bytes = 0;
+  for (const auto& table : manifest_->current().live_tables) {
+    if (table.file_size > std::numeric_limits<std::size_t>::max() - live_bytes) {
+      live_bytes = std::numeric_limits<std::size_t>::max();
+      break;
+    }
+    live_bytes += static_cast<std::size_t>(table.file_size);
+  }
+  const auto table_count = tables_.size();
+  std::size_t debt_tables = 0;
+  std::size_t debt_bytes = 0;
+  if (NeedsBackgroundCompaction()) {
+    debt_tables = table_count - options_.compaction_table_trigger + 1;
+    for (std::size_t i = 0; i < options_.compaction_table_trigger; ++i) {
+      const auto bytes = manifest_->current().live_tables[i].file_size;
+      if (bytes > std::numeric_limits<std::size_t>::max() - debt_bytes) {
+        debt_bytes = std::numeric_limits<std::size_t>::max();
+        break;
+      }
+      debt_bytes += static_cast<std::size_t>(bytes);
+    }
+  }
+  compaction_metrics_->table_count.store(table_count, std::memory_order_relaxed);
+  compaction_metrics_->live_sstable_bytes.store(live_bytes, std::memory_order_relaxed);
+  compaction_metrics_->compaction_debt_tables.store(debt_tables,
+                                                    std::memory_order_relaxed);
+  compaction_metrics_->compaction_debt_bytes.store(debt_bytes,
+                                                   std::memory_order_relaxed);
+}
 
-  std::vector<std::filesystem::path> old_table_paths;
-  std::vector<std::uint64_t> old_table_numbers;
-  old_table_paths.reserve(current.live_tables.size());
-  old_table_numbers.reserve(current.live_tables.size());
-  for (const auto& table : current.live_tables) {
-    old_table_paths.push_back(*path_ / internal::SstableFileName(table.file_number));
-    old_table_numbers.push_back(table.file_number);
+Status DB::Impl::CompactTablePrefix(std::size_t input_count, bool background) {
+  internal::ManifestSnapshot selected_snapshot;
+  std::vector<internal::TableMeta> selected_meta;
+  std::vector<std::shared_ptr<internal::SSTableReader>> selected_tables;
+  std::uint64_t replacement_number = 0;
+
+  std::unique_lock<std::shared_mutex> version_lock(mutex_);
+  {
+    auto open = CheckOpen();
+    if (!open.ok())
+      return open;
+    if (input_count == 0 || tables_.size() < input_count)
+      return Status::Ok();
+    if (manifest_->current().live_tables.size() != tables_.size())
+      return Status::Corruption("Manifest and Reader table sets differ");
+    if (background && input_count != options_.compaction_table_trigger)
+      return Status::Corruption("background compaction input count is invalid");
+    if (!background)
+      CleanupObsoleteFiles();
+
+    selected_snapshot = manifest_->current();
+    replacement_number = selected_snapshot.next_file_number;
+    if (replacement_number == std::numeric_limits<std::uint64_t>::max())
+      return Status::ResourceExhausted("file number space is exhausted");
+    selected_meta.assign(selected_snapshot.live_tables.begin(),
+                         selected_snapshot.live_tables.begin() + input_count);
+    selected_tables.assign(tables_.begin(), tables_.begin() + input_count);
+
+    if (background) {
+      // Reserve the output number before releasing the version lock. A flush
+      // may rotate its WAL while this job reads; it must receive a different
+      // number. Explicit Compact deliberately holds the lock instead, retaining
+      // its original one-Manifest publication and fault boundary.
+      auto reserved = selected_snapshot;
+      ++reserved.next_file_number;
+      auto published = manifest_->Publish(std::move(reserved));
+      if (!published.durable()) {
+        if (published.state() == internal::ManifestPublishState::kVisibleNotDurable) {
+          terminal_error_ = published.status().WithContext(
+              "reserve compaction file number: close and reopen the database");
+          return *terminal_error_;
+        }
+        return published.status().WithContext("reserve compaction file number");
+      }
+      version_lock.unlock();
+    }
   }
 
   std::vector<std::unique_ptr<internal::InternalIterator>> inputs;
-  inputs.reserve(tables_.size());
-  for (const auto& table : tables_) {
-    auto iterator = table->NewIterator({}, {});
+  inputs.reserve(selected_tables.size());
+  std::uint64_t input_bytes = 0;
+  for (std::size_t i = 0; i < selected_tables.size(); ++i) {
+    input_bytes += selected_meta[i].file_size;
+    auto iterator = selected_tables[i]->NewIterator({}, {});
     if (!iterator.ok())
       return iterator.status().WithContext("create compaction input iterator");
     inputs.push_back(std::move(iterator.value()));
@@ -886,17 +1031,15 @@ Status DB::Impl::Compact() {
   if (!merged.ok())
     return merged.status().WithContext("create compaction merge iterator");
 
-  const std::uint64_t replacement_number = current.next_file_number;
   const auto temp = *path_ / internal::SstableTempFileName(replacement_number);
   const auto final = *path_ / internal::SstableFileName(replacement_number);
   std::unique_ptr<internal::SSTableBuilder> builder;
-
   while (merged.value()->Valid()) {
     const auto& entry = merged.value()->entry();
+    // The selected run is the oldest table prefix, so no unselected table can
+    // contain an older value that requires this tombstone to remain.
     if (entry.type == internal::ValueType::kValue) {
       if (!builder) {
-        if (replacement_number == std::numeric_limits<std::uint64_t>::max())
-          return Status::ResourceExhausted("file number space is exhausted");
         auto file = fs_->OpenWritable(temp, false);
         if (!file.ok())
           return file.status().WithContext("create temporary compacted SSTable");
@@ -907,82 +1050,111 @@ Status DB::Impl::Compact() {
       if (!status.ok())
         return status.WithContext("build temporary compacted SSTable");
     }
-
     auto next = merged.value()->Next();
     if (!next.ok())
       return next.WithContext("read compaction input");
   }
   if (!merged.value()->status().ok())
     return merged.value()->status().WithContext("read compaction input");
-  merged.value().reset();
 
-  internal::ManifestSnapshot next = current;
-  next.live_tables.clear();
-  std::vector<std::unique_ptr<internal::SSTableReader>> replacement_tables;
-
+  std::optional<internal::TableMeta> replacement;
+  std::shared_ptr<internal::SSTableReader> replacement_reader;
   if (builder) {
     auto built = builder->Finish();
     if (!built.ok())
       return built.status().WithContext("finish temporary compacted SSTable");
     builder.reset();
-
     auto verify_file = fs_->OpenRandomAccess(temp);
     if (!verify_file.ok())
-      return verify_file.status().WithContext(
-          "open temporary compacted SSTable for validation");
+      return verify_file.status().WithContext("open temporary compacted SSTable");
     auto verified =
         internal::SSTableReader::Open(std::move(verify_file.value()),
                                       replacement_number, block_cache_, read_metrics_);
     if (!verified.ok())
       return verified.status().WithContext("validate temporary compacted SSTable");
     auto properties = verified.value()->ValidateAndGetProperties();
-    if (!properties.ok()) {
+    if (!properties.ok())
       return properties.status().WithContext(
           "validate temporary compacted SSTable data");
-    }
-
-    internal::TableMeta replacement{
-        replacement_number,         built.value().file_size,
-        built.value().smallest_key, built.value().largest_key,
-        built.value().min_sequence, built.value().max_sequence};
-    if (!Matches(replacement, properties.value()))
+    replacement = {replacement_number,         built.value().file_size,
+                   built.value().smallest_key, built.value().largest_key,
+                   built.value().min_sequence, built.value().max_sequence};
+    if (!Matches(*replacement, properties.value()))
       return Status::Corruption("compacted SSTable metadata does not match file");
-
     auto status = fs_->Rename(temp, final);
     if (!status.ok())
       return status.WithContext("publish compacted SSTable filename");
     status = fs_->SyncDir(*path_);
     if (!status.ok())
       return status.WithContext("sync database directory after compaction rename");
-
-    next.next_file_number = replacement_number + 1;
-    next.live_tables.push_back(std::move(replacement));
-    replacement_tables.reserve(1);
-    replacement_tables.push_back(std::move(verified.value()));
+    replacement_reader =
+        std::shared_ptr<internal::SSTableReader>(std::move(verified.value()));
   }
 
-  // This is the compaction commit point. All input iteration, replacement
-  // validation, and in-memory allocations are complete before publication.
-  auto published = manifest_->Publish(std::move(next));
-  if (!published.durable()) {
-    if (published.state() == internal::ManifestPublishState::kVisibleNotDurable) {
-      terminal_error_ = published.status().WithContext(
-          "publish compaction MANIFEST: replacement may be visible; close and "
-          "reopen the database");
-      return *terminal_error_;
+  std::vector<std::filesystem::path> obsolete_paths;
+  std::vector<std::uint64_t> obsolete_numbers;
+  {
+    if (!version_lock.owns_lock())
+      version_lock.lock();
+    if (manifest_->current().live_tables.size() != tables_.size() ||
+        tables_.size() < selected_meta.size())
+      return Status::Corruption("compaction version changed unexpectedly");
+    for (std::size_t i = 0; i < selected_meta.size(); ++i) {
+      if (manifest_->current().live_tables[i].file_number !=
+          selected_meta[i].file_number)
+        return Status::Corruption(
+            "compaction input is no longer the oldest table prefix");
     }
-    return published.status().WithContext("publish compaction MANIFEST");
-  }
 
-  // Publication made the replacement authoritative. The swap is noexcept;
-  // closing old readers and removing their files are best-effort cleanup.
-  tables_.swap(replacement_tables);
-  replacement_tables.clear();
-  for (const auto old_table_number : old_table_numbers)
-    block_cache_->EraseTable(old_table_number);
+    auto next = manifest_->current();
+    next.live_tables.erase(next.live_tables.begin(),
+                           next.live_tables.begin() + selected_meta.size());
+    if (replacement) {
+      next.live_tables.insert(next.live_tables.begin(), *replacement);
+      if (next.next_file_number == replacement_number)
+        ++next.next_file_number;
+    } else if (next.next_file_number == replacement_number + 1)
+      next.next_file_number = replacement_number;
+
+    auto published = manifest_->Publish(std::move(next));
+    if (!published.durable()) {
+      if (published.state() == internal::ManifestPublishState::kVisibleNotDurable) {
+        terminal_error_ = published.status().WithContext(
+            "publish compaction MANIFEST: replacement may be visible; close and reopen "
+            "the database");
+        return *terminal_error_;
+      }
+      return published.status().WithContext("publish compaction MANIFEST");
+    }
+
+    obsolete_paths.reserve(selected_meta.size());
+    obsolete_numbers.reserve(selected_meta.size());
+    for (const auto& meta : selected_meta) {
+      obsolete_paths.push_back(*path_ / internal::SstableFileName(meta.file_number));
+      obsolete_numbers.push_back(meta.file_number);
+    }
+    tables_.erase(tables_.begin(), tables_.begin() + selected_meta.size());
+    if (replacement_reader)
+      tables_.insert(tables_.begin(), std::move(replacement_reader));
+    compaction_metrics_->compactions.fetch_add(1, std::memory_order_relaxed);
+    if (background)
+      compaction_metrics_->background_compactions.fetch_add(1,
+                                                            std::memory_order_relaxed);
+    compaction_metrics_->compaction_input_tables.fetch_add(selected_meta.size(),
+                                                           std::memory_order_relaxed);
+    compaction_metrics_->compaction_output_tables.fetch_add(replacement ? 1 : 0,
+                                                            std::memory_order_relaxed);
+    compaction_metrics_->compaction_input_bytes.fetch_add(input_bytes,
+                                                          std::memory_order_relaxed);
+    compaction_metrics_->compaction_output_bytes.fetch_add(
+        replacement ? replacement->file_size : 0, std::memory_order_relaxed);
+    UpdateCompactionGauges();
+  }
+  for (const auto number : obsolete_numbers)
+    block_cache_->EraseTable(number);
   bool removed_any = false;
-  for (const auto& old_table : old_table_paths)
-    removed_any = BestEffortRemove(old_table) || removed_any;
+  for (const auto& path : obsolete_paths)
+    removed_any = BestEffortRemove(path) || removed_any;
   if (removed_any)
     BestEffortSyncDir();
   return Status::Ok();
@@ -1089,7 +1261,15 @@ Status DB::Impl::Close() {
     return Status::AlreadyClosed("database is closed");
 
   closing_ = true;
+  compaction_requested_ = false;
   while (!background_error_ && !terminal_error_) {
+    if (background_compaction_running_) {
+      background_cv_.wait(lock, [&] {
+        return !background_compaction_running_ || background_error_.has_value() ||
+               terminal_error_.has_value();
+      });
+      continue;
+    }
     if (immutable_memtable_) {
       flush_requested_ = true;
       background_cv_.notify_all();

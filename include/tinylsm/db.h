@@ -6,6 +6,7 @@
 #include <string_view>
 #include <vector>
 
+#include "tinylsm/compaction_metrics.h"
 #include "tinylsm/options.h"
 #include "tinylsm/read_metrics.h"
 #include "tinylsm/result.h"
@@ -95,7 +96,14 @@ public:
   /// Metrics remain available after Close().
   [[nodiscard]] WriteMetrics GetWriteMetrics() const noexcept;
 
-  /// Rewrites all currently published SSTables into zero or one replacement.
+  /// Returns cumulative compaction byte counters and the current table/debt
+  /// gauges. Combine these raw counts with workload logical bytes to calculate
+  /// read, write, and space amplification.
+  [[nodiscard]] CompactionMetrics GetCompactionMetrics() const noexcept;
+
+  /// Rewrites a snapshot of all currently published SSTables into zero or one
+  /// replacement. Concurrent writes may publish newer tables while the rewrite
+  /// is being built; they remain visible as newer tables.
   ///
   /// Compaction is synchronous and does not flush or modify the MemTable or
   /// active WAL. Because it covers every published table, obsolete versions

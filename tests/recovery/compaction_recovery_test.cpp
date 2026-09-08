@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -24,6 +25,7 @@ tinylsm::Options FlushEveryWriteOptions() {
   tinylsm::Options options;
   options.memtable_bytes = 1;
   options.sstable_block_bytes = 40;
+  options.compaction_table_trigger = 0;
   return options;
 }
 
@@ -140,6 +142,7 @@ TEST(DBCompactionTest, PreservesLogicalStateAndNewerMemtableAcrossReopen) {
 
   tinylsm::Options large_memtable;
   large_memtable.sstable_block_bytes = 40;
+  large_memtable.compaction_table_trigger = 0;
   auto opened = tinylsm::DB::Open(dir.path(), large_memtable);
   ASSERT_TRUE(opened.ok()) << opened.status().ToString();
   auto before = LoadManifest(dir.path());
@@ -268,4 +271,172 @@ TEST(CompactionRecoveryTest, CleanupExceptionDoesNotChangeCommittedSuccess) {
   ASSERT_EQ(published.value().live_tables.size(), 1U);
   EXPECT_EQ(opened.value()->Get("a").value(), "new-a");
   EXPECT_EQ(opened.value()->Get("b").value(), "live-b");
+}
+
+TEST(BackgroundCompactionTest, DropsOnlySafeOldestPrefixTombstoneAndReportsRawMetrics) {
+  TempDir dir;
+  tinylsm::Options options = FlushEveryWriteOptions();
+  options.sync_on_write = false;
+  options.compaction_table_trigger = 2;
+  auto opened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+  ASSERT_TRUE(opened.value()->Put("gone", "old").ok());
+  ASSERT_TRUE(
+      tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
+  ASSERT_TRUE(opened.value()->Delete("gone").ok());
+  ASSERT_TRUE(
+      tinylsm::internal::DBTestPeer::WaitForBackgroundWork(*opened.value()).ok());
+
+  const auto compaction = opened.value()->GetCompactionMetrics();
+  EXPECT_EQ(compaction.compactions, 1U);
+  EXPECT_EQ(compaction.background_compactions, 1U);
+  EXPECT_EQ(compaction.compaction_input_tables, 2U);
+  EXPECT_EQ(compaction.compaction_output_tables, 0U);
+  EXPECT_GT(compaction.compaction_input_bytes, 0U);
+  EXPECT_EQ(compaction.compaction_output_bytes, 0U);
+  EXPECT_EQ(compaction.table_count, 0U);
+  EXPECT_EQ(compaction.compaction_debt_tables, 0U);
+  EXPECT_GT(compaction.flush_output_bytes, 0U);
+
+  const auto writes = opened.value()->GetWriteMetrics();
+  EXPECT_EQ(writes.logical_write_bytes, 11U);
+  EXPECT_EQ(opened.value()->Get("gone").status().code(),
+            tinylsm::StatusCode::kNotFound);
+  EXPECT_EQ(opened.value()->GetReadMetrics().point_lookups, 1U);
+  ASSERT_TRUE(opened.value()->Close().ok());
+
+  auto reopened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
+  EXPECT_EQ(reopened.value()->Get("gone").status().code(),
+            tinylsm::StatusCode::kNotFound);
+}
+
+TEST(BackgroundCompactionRecoveryTest, FailedCommitKeepsTheOldestPrefixRecoverable) {
+  TempDir dir;
+  {
+    auto source = tinylsm::DB::Open(dir.path(), FlushEveryWriteOptions());
+    ASSERT_TRUE(source.ok()) << source.status().ToString();
+    ASSERT_TRUE(source.value()->Put("key-0", "value-0").ok());
+    ASSERT_TRUE(source.value()->Put("key-1", "value-1").ok());
+    ASSERT_TRUE(source.value()->Close().ok());
+  }
+  auto plan = std::make_shared<FaultPlan>();
+  plan->Fail(FaultOperation::kRename, "MANIFEST", 2);
+  tinylsm::Options options = FlushEveryWriteOptions();
+  options.compaction_table_trigger = 2;
+  auto opened = tinylsm::internal::DBTestPeer::Open(
+      dir.path(), options, tinylsm::test::NewFaultInjectionFileSystem(plan));
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+  const auto waited =
+      tinylsm::internal::DBTestPeer::WaitForBackgroundWork(*opened.value());
+  EXPECT_EQ(waited.code(), tinylsm::StatusCode::kIOError);
+  EXPECT_EQ(opened.value()->Get("key-0").status().code(),
+            tinylsm::StatusCode::kIOError);
+  EXPECT_EQ(opened.value()->Close().code(), tinylsm::StatusCode::kIOError);
+  opened.value().reset();
+
+  options.compaction_table_trigger = 0;
+  auto reopened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
+  EXPECT_EQ(reopened.value()->Get("key-0").value(), "value-0");
+  EXPECT_EQ(reopened.value()->Get("key-1").value(), "value-1");
+}
+
+TEST(BackgroundCompactionRecoveryTest, ManifestSyncDirFailureFreezesUntilReopen) {
+  TempDir dir;
+  {
+    auto source = tinylsm::DB::Open(dir.path(), FlushEveryWriteOptions());
+    ASSERT_TRUE(source.ok()) << source.status().ToString();
+    ASSERT_TRUE(source.value()->Put("key-0", "value-0").ok());
+    ASSERT_TRUE(source.value()->Put("key-1", "value-1").ok());
+    ASSERT_TRUE(source.value()->Close().ok());
+  }
+  auto plan = std::make_shared<FaultPlan>();
+  // Reservation Manifest sync, output SST directory sync, then replacement
+  // Manifest directory sync.
+  plan->Fail(FaultOperation::kSyncDir, "", 3);
+  tinylsm::Options options = FlushEveryWriteOptions();
+  options.compaction_table_trigger = 2;
+  auto opened = tinylsm::internal::DBTestPeer::Open(
+      dir.path(), options, tinylsm::test::NewFaultInjectionFileSystem(plan));
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+  const auto waited =
+      tinylsm::internal::DBTestPeer::WaitForBackgroundWork(*opened.value());
+  EXPECT_EQ(waited.code(), tinylsm::StatusCode::kIOError);
+  EXPECT_NE(waited.message().find("close and reopen"), std::string::npos);
+  EXPECT_EQ(opened.value()->Scan("", "").status().code(),
+            tinylsm::StatusCode::kIOError);
+  EXPECT_TRUE(opened.value()->Close().ok());
+  opened.value().reset();
+
+  options.compaction_table_trigger = 0;
+  auto reopened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
+  EXPECT_EQ(reopened.value()->Get("key-0").value(), "value-0");
+  EXPECT_EQ(reopened.value()->Get("key-1").value(), "value-1");
+}
+
+TEST(BackgroundCompactionTest, LongMixedWorkloadMatchesReferenceAcrossReopen) {
+  TempDir dir;
+  tinylsm::Options options;
+  options.memtable_bytes = 4U * 1024U;
+  options.sstable_block_bytes = 512;
+  options.sync_on_write = false;
+  options.compaction_table_trigger = 4;
+  auto opened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+  std::map<std::string, std::string, std::less<>> reference;
+  for (std::size_t i = 0; i < 5'000; ++i) {
+    const auto key = "key-" + std::to_string((i * 37) % 257);
+    if (i % 11 == 0) {
+      ASSERT_TRUE(opened.value()->Delete(key).ok());
+      reference.erase(key);
+    } else {
+      const auto value = "value-" + std::to_string(i);
+      ASSERT_TRUE(opened.value()->Put(key, value).ok());
+      reference[key] = value;
+    }
+
+    if (i % 17 == 0) {
+      const auto expected = reference.find(key);
+      const auto actual = opened.value()->Get(key);
+      if (expected == reference.end()) {
+        EXPECT_EQ(actual.status().code(), tinylsm::StatusCode::kNotFound);
+      } else {
+        ASSERT_TRUE(actual.ok()) << actual.status().ToString();
+        EXPECT_EQ(actual.value(), expected->second);
+      }
+    }
+    if (i % 251 == 0) {
+      const auto actual = opened.value()->Scan("", "");
+      ASSERT_TRUE(actual.ok()) << actual.status().ToString();
+      ASSERT_EQ(actual.value().size(), reference.size());
+      auto expected = reference.begin();
+      for (const auto& entry : actual.value()) {
+        EXPECT_EQ(entry.key, expected->first);
+        EXPECT_EQ(entry.value, expected->second);
+        ++expected;
+      }
+    }
+  }
+
+  ASSERT_TRUE(
+      tinylsm::internal::DBTestPeer::WaitForBackgroundWork(*opened.value()).ok());
+  ASSERT_TRUE(opened.value()->Close().ok());
+  options.compaction_table_trigger = 0;
+  auto reopened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
+  const auto actual = reopened.value()->Scan("", "");
+  ASSERT_TRUE(actual.ok()) << actual.status().ToString();
+  ASSERT_EQ(actual.value().size(), reference.size());
+  auto expected = reference.begin();
+  for (const auto& entry : actual.value()) {
+    EXPECT_EQ(entry.key, expected->first);
+    EXPECT_EQ(entry.value, expected->second);
+    ++expected;
+  }
 }

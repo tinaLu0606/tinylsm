@@ -27,6 +27,7 @@ public:
 
   std::atomic<std::uint64_t> writes{0};
   std::atomic<std::uint64_t> write_batches{0};
+  std::atomic<std::uint64_t> logical_write_bytes{0};
   std::atomic<std::uint64_t> wal_syncs{0};
   std::atomic<std::uint64_t> memtable_rotations{0};
   std::atomic<std::uint64_t> background_flushes{0};
@@ -37,6 +38,24 @@ public:
   std::atomic<std::size_t> max_background_queue_depth{0};
   std::atomic<std::size_t> immutable_memtable_bytes{0};
   std::atomic<std::size_t> max_immutable_memtable_bytes{0};
+};
+
+class CompactionMetricsState {
+public:
+  [[nodiscard]] CompactionMetrics Snapshot() const noexcept;
+
+  std::atomic<std::uint64_t> compactions{0};
+  std::atomic<std::uint64_t> background_compactions{0};
+  std::atomic<std::uint64_t> compaction_failures{0};
+  std::atomic<std::uint64_t> compaction_input_tables{0};
+  std::atomic<std::uint64_t> compaction_output_tables{0};
+  std::atomic<std::uint64_t> compaction_input_bytes{0};
+  std::atomic<std::uint64_t> compaction_output_bytes{0};
+  std::atomic<std::uint64_t> flush_output_bytes{0};
+  std::atomic<std::size_t> table_count{0};
+  std::atomic<std::size_t> live_sstable_bytes{0};
+  std::atomic<std::size_t> compaction_debt_tables{0};
+  std::atomic<std::size_t> compaction_debt_bytes{0};
 };
 
 } // namespace internal
@@ -57,6 +76,7 @@ public:
   Result<std::vector<Entry>> Scan(std::string_view begin, std::string_view end) const;
   [[nodiscard]] ReadMetrics GetReadMetrics() const noexcept;
   [[nodiscard]] WriteMetrics GetWriteMetrics() const noexcept;
+  [[nodiscard]] CompactionMetrics GetCompactionMetrics() const noexcept;
   Status Compact();
   Status Close();
   ~Impl();
@@ -85,10 +105,14 @@ private:
   Status PrepareForWrite(std::unique_lock<std::shared_mutex>& lock);
   Status RotateMemTable();
   Status FlushImmutableMemTable();
-  void BackgroundFlushLoop() noexcept;
+  Status CompactTablePrefix(std::size_t input_count, bool background);
+  void BackgroundWorkLoop() noexcept;
   Status StartBackgroundWorker();
   void StopBackgroundWorker() noexcept;
   void WaitForBackgroundFlush(std::unique_lock<std::shared_mutex>& lock);
+  void WaitForBackgroundWork(std::unique_lock<std::shared_mutex>& lock);
+  void UpdateCompactionGauges() noexcept;
+  [[nodiscard]] bool NeedsBackgroundCompaction() const noexcept;
 
   bool BestEffortRemove(const std::filesystem::path& path) noexcept;
   void BestEffortClose(internal::WalWriter* wal) noexcept;
@@ -103,10 +127,11 @@ private:
   std::unique_ptr<internal::MemTable> immutable_memtable_;
   std::unique_ptr<internal::WalWriter> wal_;
   /// Readers are kept in the Manifest's oldest-to-newest order.
-  std::vector<std::unique_ptr<internal::SSTableReader>> tables_;
+  std::vector<std::shared_ptr<internal::SSTableReader>> tables_;
   std::unique_ptr<internal::ManifestState> manifest_;
   std::shared_ptr<internal::ReadMetricsState> read_metrics_;
   std::shared_ptr<internal::WriteMetricsState> write_metrics_;
+  std::shared_ptr<internal::CompactionMetricsState> compaction_metrics_;
   std::shared_ptr<internal::BlockCache> block_cache_;
   /// Set when the authoritative on-disk Manifest is uncertain. Close remains
   /// available, but every data operation fails until the caller reopens the DB.
@@ -117,7 +142,9 @@ private:
   bool closed_ = false;
   bool closing_ = false;
   bool flush_requested_ = false;
+  bool compaction_requested_ = false;
   bool background_flush_running_ = false;
+  bool background_compaction_running_ = false;
   bool worker_stopping_ = false;
   std::thread background_worker_;
   std::condition_variable_any background_cv_;

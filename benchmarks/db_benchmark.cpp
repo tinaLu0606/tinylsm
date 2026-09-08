@@ -15,9 +15,11 @@
 #include <utility>
 #include <vector>
 
+#include "tinylsm/compaction_metrics.h"
 #include "tinylsm/db.h"
 #include "tinylsm/read_metrics.h"
 #include "tinylsm/write_batch.h"
+#include "tinylsm/write_metrics.h"
 
 #ifdef TINYLSM_HAVE_LEVELDB
 #include <leveldb/db.h>
@@ -753,6 +755,165 @@ void CompactManyTables(benchmark::State& state, std::uint64_t records,
   }
 }
 
+void CompactionMixed(benchmark::State& state, bool background, std::uint64_t operations,
+                     std::size_t key_space, std::size_t value_bytes) {
+  for (auto _ : state) {
+    (void)_;
+    TemporaryDirectory directory(background ? "compact-mixed-background"
+                                            : "compact-mixed-manual");
+    tinylsm::Options options;
+    options.sync_on_write = false;
+    options.memtable_bytes = 64U * 1024U;
+    options.block_cache_bytes = 0;
+    options.compaction_table_trigger = background ? 4 : 0;
+    auto opened = tinylsm::DB::Open(directory.path(), options);
+    if (!opened.ok()) {
+      state.SkipWithError("open failed");
+      return;
+    }
+
+    auto db = std::move(opened.value());
+    std::vector<bool> live(key_space);
+    std::vector<double> write_latencies;
+    std::vector<double> read_latencies;
+    std::vector<double> scan_latencies;
+    write_latencies.reserve(static_cast<std::size_t>(operations));
+    read_latencies.reserve(static_cast<std::size_t>(operations / 5));
+    scan_latencies.reserve(static_cast<std::size_t>(operations / 100));
+    std::uint64_t writes = 0;
+    std::uint64_t reads = 0;
+    std::uint64_t scans = 0;
+    std::uint64_t random = 0x5eedULL;
+
+    const auto started = Clock::now();
+    for (std::uint64_t i = 0; i < operations; ++i) {
+      const auto random_key = static_cast<std::size_t>(NextRandom(random) % key_space);
+      const auto key_index = i % 3 == 0   ? static_cast<std::size_t>(i % key_space)
+                             : i % 3 == 1 ? random_key % 64
+                                          : random_key;
+      const auto operation_started = Clock::now();
+      tinylsm::Status status;
+      switch (i % 100) {
+      case 0:
+        status = db->Delete(Key(key_index));
+        live[key_index] = false;
+        break;
+      case 98: {
+        auto result = db->Get(Key(key_index));
+        if (!result.ok() && result.status().code() != tinylsm::StatusCode::kNotFound) {
+          state.SkipWithError(result.status().ToString().c_str());
+          return;
+        }
+        read_latencies.push_back(
+            std::chrono::duration<double, std::micro>(Clock::now() - operation_started)
+                .count());
+        ++reads;
+        continue;
+      }
+      case 99: {
+        const auto begin = Key(key_index / 2);
+        const auto end = Key(std::min(key_space, key_index / 2 + 128));
+        auto result = db->Scan(begin, end);
+        if (!result.ok()) {
+          state.SkipWithError(result.status().ToString().c_str());
+          return;
+        }
+        scan_latencies.push_back(
+            std::chrono::duration<double, std::micro>(Clock::now() - operation_started)
+                .count());
+        ++scans;
+        continue;
+      }
+      default:
+        status = db->Put(Key(key_index), Value(i, value_bytes));
+        live[key_index] = true;
+        break;
+      }
+      if (!status.ok()) {
+        state.SkipWithError(status.ToString().c_str());
+        return;
+      }
+      write_latencies.push_back(
+          std::chrono::duration<double, std::micro>(Clock::now() - operation_started)
+              .count());
+      ++writes;
+    }
+    const auto stopped = Clock::now();
+
+    if (!background && !db->Compact().ok()) {
+      state.SkipWithError("manual compaction failed");
+      return;
+    }
+    if (!db->Close().ok()) {
+      state.SkipWithError("close failed");
+      return;
+    }
+
+    const auto read_metrics = db->GetReadMetrics();
+    const auto write_metrics = db->GetWriteMetrics();
+    const auto compaction_metrics = db->GetCompactionMetrics();
+    std::uint64_t logical_live_bytes = 0;
+    for (std::size_t i = 0; i < key_space; ++i) {
+      if (live[i])
+        logical_live_bytes += Key(i).size() + value_bytes;
+    }
+
+    SetMeasurements(state, operations, writes * (16 + value_bytes),
+                    std::chrono::duration<double>(stopped - started).count());
+    state.counters["foreground_writes"] = static_cast<double>(writes);
+    state.counters["foreground_reads"] = static_cast<double>(reads);
+    state.counters["foreground_scans"] = static_cast<double>(scans);
+    state.counters["put_p50_us"] = Percentile(write_latencies, 0.50);
+    state.counters["put_p95_us"] = Percentile(write_latencies, 0.95);
+    state.counters["put_p99_us"] = Percentile(write_latencies, 0.99);
+    state.counters["get_p50_us"] = Percentile(read_latencies, 0.50);
+    state.counters["get_p95_us"] = Percentile(read_latencies, 0.95);
+    state.counters["get_p99_us"] = Percentile(read_latencies, 0.99);
+    state.counters["scan_p50_us"] = Percentile(scan_latencies, 0.50);
+    state.counters["scan_p95_us"] = Percentile(scan_latencies, 0.95);
+    state.counters["scan_p99_us"] = Percentile(scan_latencies, 0.99);
+    state.counters["point_lookups"] = static_cast<double>(read_metrics.point_lookups);
+    state.counters["table_probes"] = static_cast<double>(read_metrics.table_probes);
+    state.counters["scan_table_inputs"] =
+        static_cast<double>(read_metrics.scan_table_inputs);
+    state.counters["logical_write_bytes"] =
+        static_cast<double>(write_metrics.logical_write_bytes);
+    state.counters["logical_live_bytes"] = static_cast<double>(logical_live_bytes);
+    state.counters["flush_output_bytes"] =
+        static_cast<double>(compaction_metrics.flush_output_bytes);
+    state.counters["compaction_input_bytes"] =
+        static_cast<double>(compaction_metrics.compaction_input_bytes);
+    state.counters["compaction_output_bytes"] =
+        static_cast<double>(compaction_metrics.compaction_output_bytes);
+    state.counters["compactions"] = static_cast<double>(compaction_metrics.compactions);
+    state.counters["background_compactions"] =
+        static_cast<double>(compaction_metrics.background_compactions);
+    state.counters["table_count"] = static_cast<double>(compaction_metrics.table_count);
+    state.counters["live_sstable_bytes"] =
+        static_cast<double>(compaction_metrics.live_sstable_bytes);
+    state.counters["compaction_debt_tables"] =
+        static_cast<double>(compaction_metrics.compaction_debt_tables);
+    state.counters["compaction_debt_bytes"] =
+        static_cast<double>(compaction_metrics.compaction_debt_bytes);
+    state.counters["read_amplification"] =
+        read_metrics.point_lookups == 0
+            ? 0.0
+            : static_cast<double>(read_metrics.table_probes) /
+                  static_cast<double>(read_metrics.point_lookups);
+    state.counters["write_amplification"] =
+        write_metrics.logical_write_bytes == 0
+            ? 0.0
+            : static_cast<double>(compaction_metrics.flush_output_bytes +
+                                  compaction_metrics.compaction_output_bytes) /
+                  static_cast<double>(write_metrics.logical_write_bytes);
+    state.counters["space_amplification"] =
+        logical_live_bytes == 0
+            ? 0.0
+            : static_cast<double>(compaction_metrics.live_sstable_bytes) /
+                  static_cast<double>(logical_live_bytes);
+  }
+}
+
 void RegisterCommon(std::string_view prefix, EngineKind kind) {
   benchmark::RegisterBenchmark((std::string(prefix) + "/FillSequentialAsync").c_str(),
                                FillSequential, kind, false, 100'000, 100)
@@ -874,6 +1035,16 @@ const bool registered = [] {
   }
   benchmark::RegisterBenchmark("TinyLSM/CompactManyTables", CompactManyTables, 100'000,
                                100)
+      ->Iterations(1)
+      ->Repetitions(5)
+      ->UseManualTime();
+  benchmark::RegisterBenchmark("TinyLSM/CompactionMixedManual", CompactionMixed, false,
+                               20'000, 4'096, 256)
+      ->Iterations(1)
+      ->Repetitions(5)
+      ->UseManualTime();
+  benchmark::RegisterBenchmark("TinyLSM/CompactionMixedSizeTiered", CompactionMixed,
+                               true, 20'000, 4'096, 256)
       ->Iterations(1)
       ->Repetitions(5)
       ->UseManualTime();

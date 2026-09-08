@@ -26,6 +26,9 @@ ReadMetrics DB::GetReadMetrics() const noexcept {
 WriteMetrics DB::GetWriteMetrics() const noexcept {
   return impl_ ? impl_->GetWriteMetrics() : WriteMetrics{};
 }
+CompactionMetrics DB::GetCompactionMetrics() const noexcept {
+  return impl_ ? impl_->GetCompactionMetrics() : CompactionMetrics{};
+}
 Status DB::Compact() { return impl_->Compact(); }
 Status DB::Close() { return impl_->Close(); }
 } // namespace tinylsm

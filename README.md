@@ -10,10 +10,11 @@ learning-oriented prototype rather than a production database. The write path
 uses an active WAL/MemTable plus one bounded immutable WAL/MemTable generation:
 rotation is durable before a single background worker flushes the immutable
 generation into an ordered set of SSTables. Range scans lazily merge active
-memory, immutable memory, and tables; callers can explicitly run synchronous
-full compaction. `Get`, `Scan`, and diagnostic snapshots share a read lock;
-writes, compaction, and close coordinate state with the exclusive lock, so a
-long Scan can delay a writer.
+memory, immutable memory, and tables. A bounded worker then performs simplified
+size-tiered compaction of the oldest table prefix when its table-count trigger
+is reached; callers can still run an explicit synchronous full compaction.
+`Get`, `Scan`, and diagnostic snapshots share a read lock; writes and close
+coordinate state with the exclusive lock, so a long Scan can delay a writer.
 
 ## Quick start
 
@@ -221,6 +222,13 @@ one handle: WAL syncs, MemTable rotations, successful/failed background flushes,
 backpressure waits and duration, plus current and maximum immutable-generation
 queue depth/bytes. It is an observability aid, not a latency benchmark by itself.
 
+`GetReadMetrics()` additionally exposes raw point-lookup, range-scan, table-probe
+and scan-table-input counts. `GetCompactionMetrics()` exposes compaction
+input/output table and physical-byte counters, current table count, live SSTable
+bytes, and table/byte debt. Together with workload logical bytes these permit
+recomputing read, write, and space amplification rather than relying on a single
+opaque score.
+
 ## Implemented scope
 
 - WAL-first `Put`, `Delete`, and atomic `WriteBatch`, with optional per-write or
@@ -232,6 +240,9 @@ queue depth/bytes. It is an observability aid, not a latency benchmark by itself
 - Tombstones that hide deleted values across memory and disk.
 - Half-open ordered range scans that merge active MemTable, immutable MemTable,
   and SSTable state.
+- Default bounded background size-tiered compaction: once four tables are live,
+  merge the oldest contiguous prefix into zero or one replacement. Set
+  `Options::compaction_table_trigger = 0` to disable automatic scheduling.
 - Explicit synchronous full compaction into zero or one replacement SSTable.
 - A version-3 Manifest snapshot that records active and optional immutable WALs,
   the ordered SSTable set, and sequence state while retaining version-1 and
@@ -323,9 +334,10 @@ and reopens after a visible-but-not-durable Manifest publication failure.
 ```
 
 Every delete is stored as a tombstone rather than removing older bytes in place.
-This is necessary because the older value may still exist in an immutable
-SSTable. A future compaction stage can discard a tombstone only after it can prove
-that no older visible value remains.
+The simplified background strategy only compacts the oldest table prefix, so it
+may discard an input tombstone only because no unselected older table exists.
+Newer tables and memory retain their higher-sequence visibility. Other partial
+selection shapes would have to preserve the tombstone.
 
 ### Read and scan paths
 
@@ -355,16 +367,22 @@ active MemTable/WAL reaches threshold
 
 ### Compaction commit protocol
 
-`Compact()` merges every published SSTable through the same internal iterator
-path as `Scan`. It keeps the newest sequence for each key, drops tombstones, and
-does not flush the MemTable or replace the active WAL.
+Automatic compaction merges the oldest contiguous table prefix through the same
+internal iterator path as `Scan`. It keeps the newest sequence for each key and
+drops tombstones only for that oldest prefix. The worker durable-reserves its
+output number before reading its shared reader snapshot outside the state lock;
+flush and compaction serialize their Manifest updates at the same state boundary.
+
+`Compact()` remains a synchronous full-table maintenance operation. It waits for
+background work, keeps the historical single-Manifest fault boundary, and does
+not flush the MemTable or replace the active WAL.
 
 ```text
-published SSTables
-    -> merge all entries and build a replacement when a live value exists
+oldest N SSTables (background) or all tables (explicit)
+    -> merge selected entries and build a replacement when a live value exists
     -> verify, rename, and directory-sync the replacement SSTable
-    -> publish a Manifest containing zero or one table  <- commit point
-    -> swap the in-memory reader set without allocation
+    -> publish a Manifest replacing only the selected prefix <- commit point
+    -> replace the corresponding shared reader set
     -> best-effort remove the old SSTables
 ```
 
@@ -425,12 +443,12 @@ Manifest metadata; Open therefore costs `O(total live SSTable bytes)`.
 
 TinyLSM currently favors clarity and testability over feature breadth:
 
-- Compaction is explicit, synchronous, and full-table only; there is no
-  automatic trigger, background worker, or multi-level layout.
-- A live SSTable reader retains its file handle until explicit compaction or
-  close. Long write-only runs therefore need a MemTable threshold/workload that
-  stays below the process file-descriptor limit; automated table-set management
-  belongs to the next compaction goal.
+- The automatic strategy is intentionally one simplified size-tiered oldest-prefix
+  merge, not leveled compaction: it has no level metadata, overlap selection,
+  bandwidth throttling, rate limiter, or multiple compaction workers.
+- A reader retained by a background input snapshot may keep an old SSTable handle
+  open until that job finishes; obsolete files are best-effort unlinked only after
+  the durable Manifest commit.
 - There is no Bloom filter. SSTable decoded blocks have an in-memory bounded
   LRU cache (8 MiB by default; `Options::block_cache_bytes = 0` disables it).
   The cache is not persistent and only stores successfully validated blocks.
@@ -453,6 +471,9 @@ The follow-up work is split into independently verifiable Codex goals in
 Goal 1's fixed-Linux profile, raw before/after JSON, cache accounting, and
 concurrency result are in
 [`docs/performance/read-path-2026-09-07.md`](docs/performance/read-path-2026-09-07.md).
+Goal 3's strategy, tombstone rule, raw metric contract, and current verification
+state are in
+[`docs/performance/compaction-2026-09-08.md`](docs/performance/compaction-2026-09-08.md).
 Goal 2's bounded asynchronous-write design, two fixed-Linux raw JSON runs,
 latency/stall/RSS evidence, and failure boundary are in
 [`docs/performance/write-path-2026-09-07.md`](docs/performance/write-path-2026-09-07.md).

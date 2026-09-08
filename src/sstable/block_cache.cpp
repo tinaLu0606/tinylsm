@@ -19,7 +19,10 @@ void AddSaturating(std::size_t& total, std::size_t value) noexcept {
 } // namespace
 
 ReadMetrics ReadMetricsState::Snapshot() const noexcept {
-  return {Load(table_probes),
+  return {Load(point_lookups),
+          Load(range_scans),
+          Load(scan_table_inputs),
+          Load(table_probes),
           Load(block_reads),
           Load(block_decodes),
           Load(cache_hits),

@@ -7,6 +7,9 @@ namespace tinylsm {
 
 /// A point-in-time copy of cumulative read-path counters for one DB handle.
 struct ReadMetrics {
+  std::uint64_t point_lookups = 0;
+  std::uint64_t range_scans = 0;
+  std::uint64_t scan_table_inputs = 0;
   std::uint64_t table_probes = 0;
   std::uint64_t block_reads = 0;
   std::uint64_t block_decodes = 0;

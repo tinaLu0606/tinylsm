@@ -41,10 +41,20 @@ public:
     armed_ = true;
   }
 
+  void ArmAfterReads(std::size_t reads) {
+    std::scoped_lock lock(mutex_);
+    armed_ = true;
+    ignored_reads_ = reads;
+  }
+
   void WaitAtRead() {
     std::unique_lock lock(mutex_);
     if (!armed_)
       return;
+    if (ignored_reads_ != 0) {
+      --ignored_reads_;
+      return;
+    }
     ++arrived_;
     if (arrived_ == 2)
       cv_.notify_all();
@@ -67,6 +77,7 @@ private:
   std::condition_variable cv_;
   bool armed_ = false;
   bool released_ = false;
+  std::size_t ignored_reads_ = 0;
   std::size_t arrived_ = 0;
 };
 
@@ -343,6 +354,7 @@ TEST(DBConcurrencyTest, IndependentSstableGetsReachTheReadGateTogether) {
   tinylsm::Options options;
   options.memtable_bytes = 1;
   options.sstable_block_bytes = 40;
+  options.compaction_table_trigger = 0;
   options.block_cache_bytes = 0;
   options.sync_on_write = false;
   {
@@ -377,6 +389,46 @@ TEST(DBConcurrencyTest, IndependentSstableGetsReachTheReadGateTogether) {
   const auto metrics = opened.value()->GetReadMetrics();
   EXPECT_EQ(metrics.read_lock_acquisitions, 2U);
   EXPECT_EQ(metrics.write_lock_acquisitions, 0U);
+}
+
+TEST(BackgroundCompactionConcurrencyTest, ReaderCanOverlapTheCompactionInputSnapshot) {
+  TempDir dir;
+  tinylsm::Options source_options;
+  source_options.memtable_bytes = 1;
+  source_options.sstable_block_bytes = 40;
+  source_options.sync_on_write = false;
+  source_options.block_cache_bytes = 0;
+  source_options.compaction_table_trigger = 0;
+  {
+    auto source = tinylsm::DB::Open(dir.path(), source_options);
+    ASSERT_TRUE(source.ok()) << source.status().ToString();
+    ASSERT_TRUE(source.value()->Put("key-0", std::string(20, 'a')).ok());
+    ASSERT_TRUE(source.value()->Put("key-1", std::string(20, 'b')).ok());
+    ASSERT_TRUE(source.value()->Close().ok());
+  }
+
+  auto gate = std::make_shared<ReadGate>();
+  auto options = source_options;
+  auto opened = tinylsm::internal::DBTestPeer::Open(
+      dir.path(), options, std::make_unique<GateFileSystem>(gate));
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+  gate->Arm();
+  tinylsm::internal::DBTestPeer::RequestBackgroundCompaction(*opened.value(), 2);
+
+  tinylsm::Result<std::string> read(tinylsm::Status::NotFound("not started"));
+  std::thread reader([&] { read = opened.value()->Get("key-1"); });
+  EXPECT_TRUE(gate->WaitForTwo());
+  gate->Release();
+  reader.join();
+
+  ASSERT_TRUE(read.ok()) << read.status().ToString();
+  EXPECT_EQ(read.value(), std::string(20, 'b'));
+  ASSERT_TRUE(
+      tinylsm::internal::DBTestPeer::WaitForBackgroundWork(*opened.value()).ok());
+  auto scan = opened.value()->Scan("", "");
+  ASSERT_TRUE(scan.ok()) << scan.status().ToString();
+  EXPECT_EQ(scan.value().size(), 2U);
 }
 
 TEST(BlockCacheTest, CompactionDropsOldTableEntriesBeforeReadersChange) {
@@ -970,6 +1022,7 @@ TEST(DBTest, RepeatedFlushPreservesNewestValuesAcrossReopen) {
   tinylsm::Options options;
   options.memtable_bytes = 1;
   options.sstable_block_bytes = 40;
+  options.compaction_table_trigger = 0;
   auto opened = tinylsm::DB::Open(dir.path(), options);
   ASSERT_TRUE(opened.ok()) << opened.status().message();
 

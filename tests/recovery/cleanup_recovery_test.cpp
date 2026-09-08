@@ -25,6 +25,7 @@ tinylsm::Options FlushEveryWriteOptions() {
   tinylsm::Options options;
   options.memtable_bytes = 1;
   options.sstable_block_bytes = 40;
+  options.compaction_table_trigger = 0;
   return options;
 }
 

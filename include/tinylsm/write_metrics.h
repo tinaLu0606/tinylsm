@@ -9,6 +9,7 @@ namespace tinylsm {
 struct WriteMetrics {
   std::uint64_t writes = 0;
   std::uint64_t write_batches = 0;
+  std::uint64_t logical_write_bytes = 0;
   std::uint64_t wal_syncs = 0;
   std::uint64_t memtable_rotations = 0;
   std::uint64_t background_flushes = 0;

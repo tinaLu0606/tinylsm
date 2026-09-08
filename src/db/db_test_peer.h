@@ -29,6 +29,23 @@ public:
     db.impl_->WaitForBackgroundFlush(lock);
     return db.impl_->CheckOpen();
   }
+
+  /// Test-only synchronization point for all queued background maintenance,
+  /// including a size-tiered compaction after an immutable flush.
+  static Status WaitForBackgroundWork(DB& db) {
+    std::unique_lock lock(db.impl_->mutex_);
+    db.impl_->WaitForBackgroundWork(lock);
+    return db.impl_->CheckOpen();
+  }
+
+  /// Schedules one normal worker compaction after Open for deterministic
+  /// concurrency tests. Production scheduling still comes from table debt.
+  static void RequestBackgroundCompaction(DB& db, std::size_t table_trigger) {
+    std::unique_lock lock(db.impl_->mutex_);
+    db.impl_->options_.compaction_table_trigger = table_trigger;
+    db.impl_->compaction_requested_ = true;
+    db.impl_->background_cv_.notify_all();
+  }
 };
 
 } // namespace tinylsm::internal
