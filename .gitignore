@@ -22,3 +22,6 @@ build.ninja
 
 # Local caches
 /.cache/
+
+# Local TinyLSM Lab database files (WAL, MANIFEST, SSTables)
+/var/
