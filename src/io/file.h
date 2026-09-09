@@ -45,6 +45,14 @@ public:
   virtual Status Close() = 0;
 };
 
+/// A held advisory lock on a database's LOCK file. Releasing it (destroying
+/// the handle) is the only supported way to unlock; there is no explicit
+/// Unlock() to avoid a use-after-unlock state.
+class FileLock {
+public:
+  virtual ~FileLock() = default;
+};
+
 /// Filesystem operations used by storage modules. This layer understands paths
 /// and bytes only; it does not interpret WAL, SSTable, or Manifest contents.
 class FileSystem {
@@ -69,6 +77,10 @@ public:
   virtual Result<bool> FileExists(const std::filesystem::path& path) = 0;
   /// Persists directory-entry changes such as Rename() and Remove().
   virtual Status SyncDir(const std::filesystem::path& path) = 0;
+  /// Creates `path` if missing and takes an exclusive, non-blocking advisory
+  /// lock on it. Returns an IOError when another handle already holds the
+  /// lock, including a second handle in this same process.
+  virtual Result<std::unique_ptr<FileLock>> LockFile(const std::filesystem::path& path) = 0;
 };
 
 std::unique_ptr<FileSystem> NewPosixFileSystem();

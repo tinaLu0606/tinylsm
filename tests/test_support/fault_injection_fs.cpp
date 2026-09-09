@@ -203,6 +203,11 @@ public:
     return status;
   }
 
+  Result<std::unique_ptr<internal::FileLock>>
+  LockFile(const std::filesystem::path& path) override {
+    return inner_->LockFile(path);
+  }
+
 private:
   std::unique_ptr<internal::FileSystem> inner_;
   std::shared_ptr<FaultPlan> plan_;

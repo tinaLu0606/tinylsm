@@ -216,6 +216,10 @@ public:
   tinylsm::Status SyncDir(const std::filesystem::path& path) override {
     return inner_->SyncDir(path);
   }
+  tinylsm::Result<std::unique_ptr<tinylsm::internal::FileLock>>
+  LockFile(const std::filesystem::path& path) override {
+    return inner_->LockFile(path);
+  }
 
 private:
   std::unique_ptr<tinylsm::internal::FileSystem> inner_;
@@ -498,6 +502,22 @@ TEST(DBSnapshotTest, DoesNotSurviveCloseAndReopen) {
   EXPECT_EQ(
       reopened.value()->NewIterator({}, {}, snapshot.value().get()).status().code(),
       tinylsm::StatusCode::kInvalidArgument);
+}
+
+TEST(DBLockTest, RejectsAConcurrentOpenOfTheSameDirectory) {
+  TempDir dir;
+  auto first = tinylsm::DB::Open(dir.path());
+  ASSERT_TRUE(first.ok()) << first.status().ToString();
+
+  auto second = tinylsm::DB::Open(dir.path());
+  ASSERT_FALSE(second.ok());
+  EXPECT_EQ(second.status().code(), tinylsm::StatusCode::kIOError);
+  ASSERT_TRUE(first.value()->Put("key", "value").ok());
+
+  ASSERT_TRUE(first.value()->Close().ok());
+  auto reopened = tinylsm::DB::Open(dir.path());
+  ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
+  EXPECT_EQ(reopened.value()->Get("key").value(), "value");
 }
 
 TEST(DBSnapshotTest, ReclaimsVersionsAfterTheOldestSnapshotIsReleased) {

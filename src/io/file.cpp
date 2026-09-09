@@ -2,6 +2,7 @@
 
 #include <cerrno>
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -115,6 +116,18 @@ private:
   std::filesystem::path path_;
   PosixWriteFunction write_function_;
 };
+class PosixFileLock final : public FileLock {
+public:
+  PosixFileLock(int fd, std::filesystem::path path) : fd_(fd), path_(std::move(path)) {}
+  ~PosixFileLock() override {
+    ::flock(fd_, LOCK_UN);
+    ::close(fd_);
+  }
+
+private:
+  int fd_;
+  std::filesystem::path path_;
+};
 class PosixFileSystem final : public FileSystem {
 public:
   explicit PosixFileSystem(PosixWriteFunction write_function)
@@ -199,6 +212,20 @@ public:
     if (::close(fd) != 0)
       return Error("close directory", p, errno);
     return Status::Ok();
+  }
+  Result<std::unique_ptr<FileLock>> LockFile(const std::filesystem::path& p) override {
+    int fd = ::open(p.c_str(), O_RDWR | O_CREAT, 0644);
+    if (fd < 0)
+      return Error("open", p, errno);
+    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+      const int error_number = errno;
+      ::close(fd);
+      if (error_number == EWOULDBLOCK)
+        return Status::IOError("lock " + p.string() +
+                               ": already held by another TinyLSM handle");
+      return Error("flock", p, error_number);
+    }
+    return std::unique_ptr<FileLock>(new PosixFileLock(fd, p));
   }
 
 private:

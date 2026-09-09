@@ -138,6 +138,10 @@ private:
   Options options_;
   std::optional<std::filesystem::path> path_;
   std::unique_ptr<internal::FileSystem> fs_;
+  /// Held for the process lifetime of an open handle; released explicitly in
+  /// Close() so a synchronous reopen of the same path does not race against
+  /// this object's eventual destruction.
+  std::unique_ptr<internal::FileLock> db_lock_;
   internal::MemTable memtable_;
   std::unique_ptr<internal::MemTable> immutable_memtable_;
   std::unique_ptr<internal::WalWriter> wal_;

@@ -129,6 +129,11 @@ DB::Impl::Open(const std::filesystem::path& path, Options options,
   if (!s.ok())
     return s;
 
+  auto lock = impl->fs_->LockFile(path / "LOCK");
+  if (!lock.ok())
+    return lock.status().WithContext("open database");
+  impl->db_lock_ = std::move(lock.value());
+
   const auto manifest_path = path / "MANIFEST";
   auto manifest_exists = impl->fs_->FileExists(manifest_path);
   if (!manifest_exists.ok())
@@ -1440,6 +1445,7 @@ Status DB::Impl::Close() {
       background_worker_.join();
     lock.lock();
     closed_ = true;
+    db_lock_.reset();
     return background_error_.value_or(Status::Ok());
   }
 
@@ -1463,6 +1469,7 @@ Status DB::Impl::Close() {
 
   auto s = wal_->Close();
   closed_ = true;
+  db_lock_.reset();
   if (!s.ok())
     return s.WithContext("close database: close WAL");
   return background_error_.value_or(Status::Ok());
