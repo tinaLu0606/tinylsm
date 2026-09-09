@@ -527,9 +527,16 @@ retain the environment, test logs, Release build log, complete benchmark JSON,
 and verification evidence in one output directory.
 
 Goals 4-6 have a separately prepared, Release-only fixed-Linux runner:
-`./scripts/run_linux_next_goals.sh <output-dir>`. It records two raw JSON runs
-for Snapshot/Iterator, SSTable v2 format, and bounded Group Commit, then rejects
-any case whose two-run median CV exceeds 10%. Its matrix and interpretation
-limits are in
+`./scripts/run_linux_next_goals.sh <output-dir> [all|write-regression]`. The full
+scope records two raw JSON runs for Snapshot/Iterator, SSTable v2 format, and
+bounded Group Commit; the targeted scope records only the 12 write-regression
+cases. Either scope rejects any case whose two-run median CV exceeds 10%. Its
+matrix and interpretation limits are in
 [`docs/plans/performance/goals-4-6-experiment-contract-2026-09-09.md`](docs/plans/performance/goals-4-6-experiment-contract-2026-09-09.md).
-It is prepared but has not yet produced a Linux performance claim.
+The two retained full runs completed all 38 median cases with cross-run
+real-time CV at or below 3.645%. They exposed a full-MemTable copy in the
+single-operation write path. After replacing it with touched-key staging, the
+two targeted runs completed all 12 affected cases with CV at or below 9.309%;
+writer overlap recovered from about 0.7k to 5.1–6.0M ops/s. The detailed
+post-optimization report and both raw-data indexes are in
+[`reports/performance/portfolio-benchmark-2026-09-09.md`](reports/performance/portfolio-benchmark-2026-09-09.md).

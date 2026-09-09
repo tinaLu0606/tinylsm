@@ -130,8 +130,15 @@ StorageInspector::WalRecords(std::string_view name, std::uint64_t cursor,
       auto decoded = internal::DecodeWalRecord(internal::AsBytes(record.value()), {});
       if (decoded.ok())
         item.entry = CopyEntry(decoded.value());
-      else
-        item.validation_error = decoded.status();
+      else {
+        auto batch = internal::DecodeWalBatch(internal::AsBytes(record.value()), {});
+        if (!batch.ok())
+          item.validation_error = batch.status();
+        else if (batch.value().empty())
+          item.validation_error = Status::Corruption("WAL batch is empty");
+        else
+          item.entry = CopyEntry(batch.value().front());
+      }
     }
     page.items.push_back(std::move(item));
     offset += encoded;
@@ -158,19 +165,44 @@ StorageInspector::SstableBlocks(std::string_view name, std::uint64_t cursor,
   const auto size = std::filesystem::file_size(path.value(), error);
   if (error)
     return Status::IOError("inspect SSTable size: " + error.message());
-  if (size < internal::kSstableFooterSize)
+  if (size < internal::kSstableV1FooterSize)
     return Status::Corruption("SSTable is smaller than its footer");
-  const auto footer_bytes = ReadFileRange(
-      path.value(), size - internal::kSstableFooterSize, internal::kSstableFooterSize);
-  if (!footer_bytes.ok())
-    return footer_bytes.status();
-  auto footer = internal::DecodeFooter(internal::AsBytes(footer_bytes.value()));
-  if (!footer.ok())
-    return footer.status();
-  if (footer.value().index_offset > size - internal::kSstableFooterSize ||
-      footer.value().index_size >
-          size - internal::kSstableFooterSize - footer.value().index_offset ||
-      footer.value().index_size > kMaxRangeBytes) {
+  const auto v1_footer_bytes =
+      ReadFileRange(path.value(), size - internal::kSstableV1FooterSize,
+                    internal::kSstableV1FooterSize);
+  if (!v1_footer_bytes.ok())
+    return v1_footer_bytes.status();
+  auto footer = internal::DecodeFooter(internal::AsBytes(v1_footer_bytes.value()));
+  if (!footer.ok()) {
+    if (size < internal::kSstableFooterSize)
+      return footer.status();
+    const auto v2_footer_bytes =
+        ReadFileRange(path.value(), size - internal::kSstableFooterSize,
+                      internal::kSstableFooterSize);
+    if (!v2_footer_bytes.ok())
+      return v2_footer_bytes.status();
+    footer = internal::DecodeFooter(internal::AsBytes(v2_footer_bytes.value()));
+    if (!footer.ok())
+      return footer.status();
+  }
+  const std::uint64_t footer_size =
+      footer.value().version == internal::kSstableVersionV1
+          ? internal::kSstableV1FooterSize
+          : internal::kSstableFooterSize;
+  const std::uint64_t sections_end = size - footer_size;
+  if (footer.value().index_offset > sections_end ||
+      footer.value().index_size > sections_end - footer.value().index_offset ||
+      footer.value().index_size > kMaxRangeBytes ||
+      (footer.value().version == internal::kSstableVersionV1 &&
+       footer.value().index_offset + footer.value().index_size != sections_end) ||
+      (footer.value().version == internal::kSstableVersion &&
+       (footer.value().index_offset + footer.value().index_size !=
+            footer.value().properties_offset ||
+        footer.value().properties_offset > sections_end ||
+        footer.value().properties_size >
+            sections_end - footer.value().properties_offset ||
+        footer.value().properties_offset + footer.value().properties_size !=
+            sections_end))) {
     return Status::Corruption("SSTable index range is invalid or too large");
   }
   auto index_bytes = ReadFileRange(path.value(), footer.value().index_offset,
@@ -201,7 +233,8 @@ StorageInspector::SstableBlocks(std::string_view name, std::uint64_t cursor,
       if (!block.ok()) {
         item.validation_error = block.status();
       } else {
-        auto decoded = internal::DecodeDataBlock(internal::AsBytes(block.value()));
+        auto decoded = internal::DecodeDataBlock(internal::AsBytes(block.value()),
+                                                 footer.value().version);
         if (!decoded.ok()) {
           item.validation_error = decoded.status();
         } else {

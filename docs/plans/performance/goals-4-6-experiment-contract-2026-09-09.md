@@ -1,14 +1,18 @@
 # Goals 4-6 performance experiment contract · 2026-09-09
 
-Status: prepared locally, not yet run on the fixed Linux VM. This document
-defines the only benchmark matrix that may be used for formal performance
-claims about Goals 4-6.
+Status: completed on the fixed Linux VM. Both retained full runs contain all 38
+median cases and the cross-run real-time CV verifier accepted every case. The
+single-operation write regression found by that run was repaired, then all 12
+affected cases passed a two-run targeted verification. Detailed results and
+limitations are recorded in
+[`reports/performance/portfolio-benchmark-2026-09-09.md`](../../../reports/performance/portfolio-benchmark-2026-09-09.md).
 
 ## Fixed environment and reproducibility
 
-Run `scripts/run_linux_next_goals.sh <output-dir>` inside the pinned Ubuntu
-ARM64/ext4 VM. The runner records the source revision or archive hash, dirty
-status, toolchain, filesystem mount, memory, and two independent raw JSON runs.
+Run `scripts/run_linux_next_goals.sh <output-dir> [all|write-regression]` inside
+the pinned Ubuntu ARM64/ext4 VM. The runner records the source revision or
+archive hash, dirty status, toolchain, filesystem mount, memory, and two
+independent raw JSON runs.
 It performs a Release build only: functional Debug/sanitizer evidence is already
 recorded in the devlog and must not be rerun for each performance repetition.
 
@@ -26,9 +30,8 @@ The prepared runner retains the 12 existing cases:
 - Writer overlap with materialized Scan versus Iterator.
 
 Database population is outside the manually timed traversal interval. It uses
-bounded batches of at most 500,000 operations so setup does not trigger the
-quadratic full-MemTable copy cost of submitting every prepared key as a
-one-operation `WriteBatch`; the measured Scan, Iterator, and overlap work is
+bounded batches of at most 500,000 operations so setup cost remains bounded and
+does not dominate the run; the measured Scan, Iterator, and overlap work is
 unchanged.
 
 They report operation time, iterator/Scan behavior, Snapshot retained
@@ -71,3 +74,21 @@ data can establish whether grouping improved throughput or tail latency.
 - Do not compare macOS smoke values with Linux results.
 - Preserve both raw JSON files, `environment.txt`, Release build log, benchmark
   logs, and `verification.log` under the selected output directory.
+
+## Retained result
+
+The original full-run artifacts are under
+[`reports/performance/results/goal4-6-linux-2026-09-09/`](../../../reports/performance/results/goal4-6-linux-2026-09-09/).
+The exported source archive SHA-256 is
+`ef480687a6727112946caf6d956faf781e44f2d7b433b1aabfa3ed7e7a4619c0`.
+All 38 cross-run real-time median CV values are at most 3.645%.
+
+That run found a severe single-operation write regression caused by full
+MemTable copying in `ApplyBatch()`. The implementation now stages only touched
+keys before an allocation-free commit. The retained targeted rerun is under
+[`reports/performance/results/write-regression-fix-linux-2026-09-09/`](../../../reports/performance/results/write-regression-fix-linux-2026-09-09/);
+its source archive SHA-256 is
+`d9f631362c1b6fde4d9ffcb15b0a251c891f3cc9e81c297e3b50f7859640cfe6`.
+Both runs contain all 12 affected median cases and their cross-run real-time CV
+values are at most 9.309%. No unaffected Snapshot-retention or SSTable-codec
+case was repeated.

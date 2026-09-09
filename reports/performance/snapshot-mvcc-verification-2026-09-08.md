@@ -1,10 +1,11 @@
 # Snapshot and MVCC experiment record · 2026-09-08
 
-Status: Goal 4 functional verification is complete. Fixed-Linux performance
-experiments are intentionally deferred to a separately scheduled performance
-task; this file makes no throughput, latency, or memory-performance claim.
+Status: Goal 4 functional verification is complete. The separately scheduled
+fixed-Linux performance experiment completed on 2026-09-09; results are in
+[`portfolio-benchmark-2026-09-09.md`](portfolio-benchmark-2026-09-09.md).
+This file remains the functional-verification record.
 
-## Deferred fixed-Linux experiment
+## Fixed-Linux experiment contract
 
 When performance work is scheduled, run each configuration twice in the pinned
 Ubuntu ARM64/ext4 VM and retain raw JSON, environment capture, median, and

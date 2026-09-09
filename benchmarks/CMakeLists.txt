@@ -12,6 +12,7 @@ FetchContent_MakeAvailable(google_benchmark)
 
 add_executable(tinylsm_bench db_benchmark.cpp)
 target_link_libraries(tinylsm_bench PRIVATE tinylsm::tinylsm benchmark::benchmark)
+target_include_directories(tinylsm_bench PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_features(tinylsm_bench PRIVATE cxx_std_20)
 tinylsm_set_warnings(tinylsm_bench)
 

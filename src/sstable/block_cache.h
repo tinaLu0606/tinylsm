@@ -51,6 +51,7 @@ public:
   BlockCache(std::size_t capacity_bytes,
              std::shared_ptr<ReadMetricsState> metrics) noexcept;
 
+  [[nodiscard]] bool enabled() const noexcept { return capacity_bytes_ != 0; }
   [[nodiscard]] BlockPtr Lookup(BlockCacheKey key);
   void Insert(BlockCacheKey key, BlockPtr block, std::size_t charge);
   void EraseTable(std::uint64_t table_number);

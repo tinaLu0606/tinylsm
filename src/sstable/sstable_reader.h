@@ -1,6 +1,8 @@
 #pragma once
 
+#include <limits>
 #include <memory>
+#include <optional>
 #include <string_view>
 #include <vector>
 
@@ -14,6 +16,7 @@ namespace tinylsm::internal {
 
 struct SSTableProperties {
   std::uint64_t file_size = 0;
+  std::uint64_t entry_count = 0;
   std::string smallest_key;
   std::string largest_key;
   std::uint64_t min_sequence = 0;
@@ -30,7 +33,9 @@ public:
        std::shared_ptr<ReadMetricsState> metrics = {});
   [[nodiscard]] std::uint64_t file_size() const { return file_size_; }
   Result<SSTableProperties> ValidateAndGetProperties() const;
-  Result<InternalEntry> Get(std::string_view key) const;
+  Result<InternalEntry>
+  Get(std::string_view key,
+      std::uint64_t sequence = std::numeric_limits<std::uint64_t>::max()) const;
 
   Result<std::unique_ptr<InternalIterator>> NewIterator(std::string_view begin,
                                                         std::string_view end) const;
@@ -42,17 +47,24 @@ public:
 private:
   class Iterator;
   SSTableReader(std::unique_ptr<RandomAccessFile> file, std::uint64_t file_size,
-                std::vector<BlockMeta> blocks, std::uint64_t table_number,
-                std::shared_ptr<BlockCache> block_cache,
+                std::uint32_t version, std::vector<BlockMeta> blocks,
+                std::optional<TableProperties> persisted_properties,
+                std::uint64_t table_number, std::shared_ptr<BlockCache> block_cache,
                 std::shared_ptr<ReadMetricsState> metrics)
-      : file_(std::move(file)), file_size_(file_size), blocks_(std::move(blocks)),
+      : file_(std::move(file)), file_size_(file_size), version_(version),
+        blocks_(std::move(blocks)),
+        persisted_properties_(std::move(persisted_properties)),
         table_number_(table_number), block_cache_(std::move(block_cache)),
         metrics_(std::move(metrics)) {}
   Result<BlockCache::BlockPtr> ReadBlock(const BlockMeta& meta,
                                          bool use_cache = true) const;
+  Result<InternalEntry> FindInV2Block(const BlockMeta& meta, std::string_view key,
+                                      std::uint64_t sequence) const;
   std::unique_ptr<RandomAccessFile> file_;
   std::uint64_t file_size_ = 0;
+  std::uint32_t version_ = kSstableVersionV1;
   std::vector<BlockMeta> blocks_;
+  std::optional<TableProperties> persisted_properties_;
   std::uint64_t table_number_ = 0;
   std::shared_ptr<BlockCache> block_cache_;
   std::shared_ptr<ReadMetricsState> metrics_;

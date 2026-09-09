@@ -16,6 +16,11 @@ struct WriteMetrics {
   std::uint64_t background_flush_failures = 0;
   std::uint64_t backpressure_waits = 0;
   std::uint64_t backpressure_wait_nanoseconds = 0;
+  std::uint64_t group_commits = 0;
+  std::uint64_t grouped_write_requests = 0;
+  std::uint64_t writer_queue_wait_nanoseconds = 0;
+  std::size_t writer_queue_depth = 0;
+  std::size_t max_writer_queue_depth = 0;
   std::size_t background_queue_depth = 0;
   std::size_t max_background_queue_depth = 0;
   std::size_t immutable_memtable_bytes = 0;

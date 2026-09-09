@@ -31,6 +31,11 @@ struct Options {
   /// A single oversized entry is allowed to occupy a larger block by itself.
   std::size_t sstable_block_bytes = 16U * 1024U;
 
+  /// Number of entries between complete restart keys in v2 SSTable data
+  /// blocks. Must be non-zero. Smaller values favor random lookup; larger
+  /// values favor prefix-compression density.
+  std::uint32_t sstable_restart_interval = 16;
+
   /// Maximum logical charge of validated decoded SSTable blocks retained by
   /// this DB handle. Zero disables the Block Cache.
   std::size_t block_cache_bytes = 8U * 1024U * 1024U;
@@ -39,6 +44,22 @@ struct Options {
   /// Zero disables automatic background compaction; otherwise this must be at
   /// least two. The default bounds table count by scheduling a four-table job.
   std::size_t compaction_table_trigger = 4;
+
+  /// Maximum process-local Snapshots held by one DB. Zero explicitly disables
+  /// this bound. The default prevents forgotten Snapshot handles from making
+  /// version retention unbounded by handle count.
+  std::size_t max_active_snapshots = 1024;
+
+  /// Maximum caller requests and bytes waiting for the group-commit leader.
+  /// Writers wait for space rather than allocating an unbounded queue. Both
+  /// values must be non-zero.
+  std::size_t max_pending_write_requests = 64;
+  std::size_t max_pending_write_bytes = 8U * 1024U * 1024U;
+
+  /// Bounds one physical WAL group. A leader may combine complete public
+  /// WriteBatch calls only while both limits hold. Both values must be non-zero.
+  std::size_t max_group_commit_requests = 8;
+  std::size_t max_group_commit_bytes = 1U * 1024U * 1024U;
 };
 
 } // namespace tinylsm

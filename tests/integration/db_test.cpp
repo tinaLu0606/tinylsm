@@ -8,8 +8,11 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -100,10 +103,67 @@ private:
   std::shared_ptr<ReadGate> gate_;
 };
 
+class SyncGate {
+public:
+  void Arm() {
+    std::scoped_lock lock(mutex_);
+    armed_ = true;
+  }
+
+  void WaitAtSync() {
+    std::unique_lock lock(mutex_);
+    if (!armed_)
+      return;
+    entered_ = true;
+    cv_.notify_all();
+    cv_.wait(lock, [&] { return released_; });
+  }
+
+  bool WaitForSync() {
+    std::unique_lock lock(mutex_);
+    return cv_.wait_for(lock, std::chrono::seconds(2), [&] { return entered_; });
+  }
+
+  void Release() {
+    std::scoped_lock lock(mutex_);
+    released_ = true;
+    cv_.notify_all();
+  }
+
+private:
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  bool armed_ = false;
+  bool entered_ = false;
+  bool released_ = false;
+};
+
+class GateWritableFile final : public tinylsm::internal::WritableFile {
+public:
+  GateWritableFile(std::unique_ptr<tinylsm::internal::WritableFile> inner,
+                   std::shared_ptr<SyncGate> gate)
+      : inner_(std::move(inner)), gate_(std::move(gate)) {}
+
+  tinylsm::Status Append(std::span<const std::byte> data) override {
+    return inner_->Append(data);
+  }
+  tinylsm::Status Sync() override {
+    gate_->WaitAtSync();
+    return inner_->Sync();
+  }
+  tinylsm::Status Close() override { return inner_->Close(); }
+
+private:
+  std::unique_ptr<tinylsm::internal::WritableFile> inner_;
+  std::shared_ptr<SyncGate> gate_;
+};
+
 class GateFileSystem final : public tinylsm::internal::FileSystem {
 public:
-  explicit GateFileSystem(std::shared_ptr<ReadGate> gate)
-      : inner_(tinylsm::internal::NewPosixFileSystem()), gate_(std::move(gate)) {}
+  explicit GateFileSystem(std::shared_ptr<ReadGate> read_gate = {},
+                          std::shared_ptr<SyncGate> sync_gate = {})
+      : inner_(tinylsm::internal::NewPosixFileSystem()),
+        read_gate_(std::move(read_gate)), sync_gate_(std::move(sync_gate)) {}
 
   tinylsm::Result<std::unique_ptr<tinylsm::internal::SequentialFile>>
   OpenSequential(const std::filesystem::path& path) override {
@@ -115,13 +175,21 @@ public:
     auto opened = inner_->OpenRandomAccess(path);
     if (!opened.ok())
       return opened.status();
+    if (!read_gate_)
+      return std::move(opened.value());
     return std::unique_ptr<tinylsm::internal::RandomAccessFile>(
-        new GateRandomAccessFile(std::move(opened.value()), gate_));
+        new GateRandomAccessFile(std::move(opened.value()), read_gate_));
   }
 
   tinylsm::Result<std::unique_ptr<tinylsm::internal::WritableFile>>
   OpenWritable(const std::filesystem::path& path, bool append) override {
-    return inner_->OpenWritable(path, append);
+    auto opened = inner_->OpenWritable(path, append);
+    if (!opened.ok())
+      return opened.status();
+    if (!sync_gate_)
+      return std::move(opened.value());
+    return std::unique_ptr<tinylsm::internal::WritableFile>(
+        new GateWritableFile(std::move(opened.value()), sync_gate_));
   }
 
   tinylsm::Status CreateDir(const std::filesystem::path& path) override {
@@ -151,7 +219,8 @@ public:
 
 private:
   std::unique_ptr<tinylsm::internal::FileSystem> inner_;
-  std::shared_ptr<ReadGate> gate_;
+  std::shared_ptr<ReadGate> read_gate_;
+  std::shared_ptr<SyncGate> sync_gate_;
 };
 
 void CorruptByte(const std::filesystem::path& path, std::uint64_t offset) {
@@ -196,6 +265,54 @@ BuildTable(tinylsm::internal::FileSystem& fs, const std::filesystem::path& direc
                                       built.value().largest_key,
                                       built.value().min_sequence,
                                       built.value().max_sequence};
+}
+
+tinylsm::Result<tinylsm::internal::TableMeta>
+BuildV1Table(tinylsm::internal::FileSystem& fs, const std::filesystem::path& directory,
+             std::uint64_t number,
+             const std::vector<tinylsm::internal::InternalEntry>& entries) {
+  if (entries.empty())
+    return tinylsm::Status::InvalidArgument("cannot build an empty v1 SSTable");
+  auto file = fs.OpenWritable(directory / NumberedName(number, ".sst"), false);
+  if (!file.ok())
+    return file.status();
+  auto data = tinylsm::internal::EncodeDataBlockV1(entries);
+  if (!data.ok())
+    return data.status();
+  auto index = tinylsm::internal::EncodeIndex(
+      {{entries.front().user_key, entries.back().user_key, 0, data.value().size()}});
+  if (!index.ok())
+    return index.status();
+  const auto footer =
+      tinylsm::internal::EncodeFooterV1(data.value().size(), index.value().size());
+  auto status = file.value()->Append(tinylsm::internal::AsBytes(data.value()));
+  if (!status.ok())
+    return status;
+  status = file.value()->Append(tinylsm::internal::AsBytes(index.value()));
+  if (!status.ok())
+    return status;
+  status = file.value()->Append(tinylsm::internal::AsBytes(footer));
+  if (!status.ok())
+    return status;
+  status = file.value()->Sync();
+  if (!status.ok())
+    return status;
+  status = file.value()->Close();
+  if (!status.ok())
+    return status;
+
+  tinylsm::internal::TableMeta meta;
+  meta.file_number = number;
+  meta.file_size = data.value().size() + index.value().size() + footer.size();
+  meta.smallest_key = entries.front().user_key;
+  meta.largest_key = entries.back().user_key;
+  meta.min_sequence = entries.front().sequence;
+  meta.max_sequence = entries.front().sequence;
+  for (const auto& entry : entries) {
+    meta.min_sequence = std::min(meta.min_sequence, entry.sequence);
+    meta.max_sequence = std::max(meta.max_sequence, entry.sequence);
+  }
+  return meta;
 }
 
 tinylsm::Status CreateEmptyWal(tinylsm::internal::FileSystem& fs,
@@ -268,6 +385,334 @@ TEST(SstableTest, BuildsMultipleBlocksAndReadsBoundaryKeys) {
   EXPECT_EQ(scan.value().back().user_key, "z");
 }
 
+TEST(SstableTest, PreservesMultipleVersionsOfOneUserKey) {
+  TempDir dir;
+  auto fs = tinylsm::internal::NewPosixFileSystem();
+  ASSERT_TRUE(fs->CreateDir(dir.path()).ok());
+  auto writable = fs->OpenWritable(dir.path() / "versions.sst", false);
+  ASSERT_TRUE(writable.ok());
+  tinylsm::internal::SSTableBuilder builder(std::move(writable.value()), 40);
+  ASSERT_TRUE(builder.Add({"a", 3, tinylsm::internal::ValueType::kValue, "new"}).ok());
+  ASSERT_TRUE(builder.Add({"a", 2, tinylsm::internal::ValueType::kTombstone, ""}).ok());
+  ASSERT_TRUE(builder.Add({"a", 1, tinylsm::internal::ValueType::kValue, "old"}).ok());
+  ASSERT_TRUE(builder.Add({"b", 4, tinylsm::internal::ValueType::kValue, "bee"}).ok());
+  ASSERT_TRUE(builder.Finish().ok());
+
+  auto random = fs->OpenRandomAccess(dir.path() / "versions.sst");
+  ASSERT_TRUE(random.ok());
+  auto reader = tinylsm::internal::SSTableReader::Open(std::move(random.value()));
+  ASSERT_TRUE(reader.ok()) << reader.status().ToString();
+  EXPECT_EQ(reader.value()->Get("a").value().value, "new");
+  EXPECT_EQ(reader.value()->Get("a", 2).value().type,
+            tinylsm::internal::ValueType::kTombstone);
+  EXPECT_EQ(reader.value()->Get("a", 1).value().value, "old");
+}
+
+TEST(DBSnapshotTest, PreservesVersionAcrossFlushCompactionAndHandleClose) {
+  TempDir dir;
+  tinylsm::Options options;
+  options.memtable_bytes = 1;
+  options.sstable_block_bytes = 40;
+  options.compaction_table_trigger = 0;
+  options.max_active_snapshots = 1;
+  auto opened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+  ASSERT_TRUE(opened.value()->Put("a", "old").ok());
+  ASSERT_TRUE(
+      tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
+
+  auto snapshot = opened.value()->GetSnapshot();
+  ASSERT_TRUE(snapshot.ok()) << snapshot.status().ToString();
+  EXPECT_EQ(snapshot.value()->sequence(), 1U);
+  EXPECT_EQ(opened.value()->GetSnapshotMetrics().active_snapshots, 1U);
+  EXPECT_EQ(opened.value()->GetSnapshot().status().code(),
+            tinylsm::StatusCode::kResourceExhausted);
+
+  ASSERT_TRUE(opened.value()->Put("a", "new").ok());
+  ASSERT_TRUE(
+      tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
+  ASSERT_TRUE(opened.value()->Compact().ok());
+  EXPECT_EQ(opened.value()->Get("a").value(), "new");
+  EXPECT_EQ(opened.value()->Get("a", snapshot.value().get()).value(), "old");
+
+  auto iterator = opened.value()->NewIterator({}, {}, snapshot.value().get());
+  ASSERT_TRUE(iterator.ok()) << iterator.status().ToString();
+  ASSERT_TRUE(iterator.value()->Valid());
+  EXPECT_EQ(iterator.value()->key(), "a");
+  EXPECT_EQ(iterator.value()->value(), "old");
+  ASSERT_TRUE(opened.value()->Close().ok());
+  EXPECT_TRUE(iterator.value()->Next().ok());
+  EXPECT_FALSE(iterator.value()->Valid());
+  EXPECT_TRUE(iterator.value()->status().ok());
+
+  snapshot.value().reset();
+  EXPECT_EQ(opened.value()->GetSnapshotMetrics().active_snapshots, 0U);
+}
+
+TEST(DBSnapshotTest, IteratorSeekCannotEscapeItsCreationRange) {
+  TempDir dir;
+  auto opened = tinylsm::DB::Open(dir.path());
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+  ASSERT_TRUE(opened.value()->Put("a", "aye").ok());
+  ASSERT_TRUE(opened.value()->Put("b", "bee").ok());
+  auto iterator = opened.value()->NewIterator("b", {});
+  ASSERT_TRUE(iterator.ok()) << iterator.status().ToString();
+  ASSERT_TRUE(iterator.value()->Seek("a").ok());
+  ASSERT_TRUE(iterator.value()->Valid());
+  EXPECT_EQ(iterator.value()->key(), "b");
+}
+
+TEST(DBSnapshotTest, RejectsSnapshotFromAnotherDatabase) {
+  TempDir first_dir;
+  TempDir second_dir;
+  auto first = tinylsm::DB::Open(first_dir.path());
+  auto second = tinylsm::DB::Open(second_dir.path());
+  ASSERT_TRUE(first.ok()) << first.status().ToString();
+  ASSERT_TRUE(second.ok()) << second.status().ToString();
+  ASSERT_TRUE(first.value()->Put("key", "first").ok());
+  ASSERT_TRUE(second.value()->Put("key", "second").ok());
+  auto snapshot = first.value()->GetSnapshot();
+  ASSERT_TRUE(snapshot.ok()) << snapshot.status().ToString();
+
+  EXPECT_EQ(second.value()->Get("key", snapshot.value().get()).status().code(),
+            tinylsm::StatusCode::kInvalidArgument);
+  EXPECT_EQ(second.value()->NewIterator({}, {}, snapshot.value().get()).status().code(),
+            tinylsm::StatusCode::kInvalidArgument);
+}
+
+TEST(DBSnapshotTest, DoesNotSurviveCloseAndReopen) {
+  TempDir dir;
+  auto first = tinylsm::DB::Open(dir.path());
+  ASSERT_TRUE(first.ok()) << first.status().ToString();
+  ASSERT_TRUE(first.value()->Put("key", "old").ok());
+  auto snapshot = first.value()->GetSnapshot();
+  ASSERT_TRUE(snapshot.ok()) << snapshot.status().ToString();
+  ASSERT_TRUE(first.value()->Put("key", "new").ok());
+  ASSERT_TRUE(first.value()->Close().ok());
+
+  auto reopened = tinylsm::DB::Open(dir.path());
+  ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
+  EXPECT_EQ(reopened.value()->Get("key").value(), "new");
+  EXPECT_EQ(reopened.value()->Get("key", snapshot.value().get()).status().code(),
+            tinylsm::StatusCode::kInvalidArgument);
+  EXPECT_EQ(
+      reopened.value()->NewIterator({}, {}, snapshot.value().get()).status().code(),
+      tinylsm::StatusCode::kInvalidArgument);
+}
+
+TEST(DBSnapshotTest, ReclaimsVersionsAfterTheOldestSnapshotIsReleased) {
+  TempDir dir;
+  tinylsm::Options options;
+  options.memtable_bytes = 1;
+  options.sstable_block_bytes = 40;
+  options.compaction_table_trigger = 0;
+  auto opened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+  ASSERT_TRUE(opened.value()->Put("a", "old").ok());
+  ASSERT_TRUE(
+      tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
+  auto snapshot = opened.value()->GetSnapshot();
+  ASSERT_TRUE(snapshot.ok()) << snapshot.status().ToString();
+  ASSERT_TRUE(opened.value()->Put("a", "new").ok());
+  ASSERT_TRUE(
+      tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
+
+  ASSERT_TRUE(opened.value()->Compact().ok());
+  EXPECT_EQ(opened.value()->GetSnapshotMetrics().last_full_compaction_retained_versions,
+            2U);
+  EXPECT_EQ(opened.value()->Get("a", snapshot.value().get()).value(), "old");
+
+  snapshot.value().reset();
+  ASSERT_TRUE(opened.value()->Compact().ok());
+  EXPECT_EQ(opened.value()->GetSnapshotMetrics().last_full_compaction_retained_versions,
+            1U);
+  EXPECT_EQ(opened.value()->Get("a").value(), "new");
+}
+
+TEST(DBSnapshotTest, FailedCompactionDoesNotChangeAnActiveSnapshot) {
+  TempDir dir;
+  auto plan = std::make_shared<tinylsm::test::FaultPlan>();
+  tinylsm::Options options;
+  options.memtable_bytes = 1;
+  options.sstable_block_bytes = 40;
+  options.compaction_table_trigger = 0;
+  auto opened = tinylsm::internal::DBTestPeer::Open(
+      dir.path(), options, tinylsm::test::NewFaultInjectionFileSystem(plan));
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+  ASSERT_TRUE(opened.value()->Put("a", "old").ok());
+  ASSERT_TRUE(
+      tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
+  auto snapshot = opened.value()->GetSnapshot();
+  ASSERT_TRUE(snapshot.ok()) << snapshot.status().ToString();
+  ASSERT_TRUE(opened.value()->Put("a", "new").ok());
+  ASSERT_TRUE(
+      tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
+
+  plan->Fail(tinylsm::test::FaultOperation::kRename, "MANIFEST");
+  EXPECT_EQ(opened.value()->Compact().code(), tinylsm::StatusCode::kIOError);
+  EXPECT_EQ(opened.value()->Get("a").value(), "new");
+  EXPECT_EQ(opened.value()->Get("a", snapshot.value().get()).value(), "old");
+  EXPECT_TRUE(opened.value()->Close().ok());
+
+  auto reopened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
+  EXPECT_EQ(reopened.value()->Get("a").value(), "new");
+}
+
+TEST(DBSnapshotTest, RemainsStableWhileWritersFlushAndCompact) {
+  TempDir dir;
+  tinylsm::Options options;
+  options.memtable_bytes = 1;
+  options.sstable_block_bytes = 40;
+  options.compaction_table_trigger = 0;
+  auto opened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+  ASSERT_TRUE(opened.value()->Put("a", "stable").ok());
+  ASSERT_TRUE(
+      tinylsm::internal::DBTestPeer::WaitForBackgroundFlush(*opened.value()).ok());
+  auto snapshot = opened.value()->GetSnapshot();
+  ASSERT_TRUE(snapshot.ok()) << snapshot.status().ToString();
+
+  std::atomic<bool> writer_ok = true;
+  std::thread writer([&] {
+    for (std::size_t i = 0; i < 64; ++i) {
+      if (!opened.value()->Put("a", "new-" + std::to_string(i)).ok()) {
+        writer_ok.store(false, std::memory_order_relaxed);
+        return;
+      }
+    }
+  });
+  for (std::size_t i = 0; i < 64; ++i) {
+    const auto old = opened.value()->Get("a", snapshot.value().get());
+    if (!old.ok()) {
+      ADD_FAILURE() << old.status().ToString();
+      break;
+    }
+    EXPECT_EQ(old.value(), "stable");
+  }
+  writer.join();
+  EXPECT_TRUE(writer_ok.load(std::memory_order_relaxed));
+  ASSERT_TRUE(
+      tinylsm::internal::DBTestPeer::WaitForBackgroundWork(*opened.value()).ok());
+  ASSERT_TRUE(opened.value()->Compact().ok());
+  EXPECT_EQ(opened.value()->Get("a", snapshot.value().get()).value(), "stable");
+  EXPECT_NE(opened.value()->Get("a").value(), "stable");
+}
+
+TEST(DBSnapshotTest, FixedSeedReferenceModelCoversBatchesSnapshotsAndCompaction) {
+  struct Version {
+    std::uint64_t sequence;
+    std::optional<std::string> value;
+  };
+  struct SavedSnapshot {
+    std::shared_ptr<const tinylsm::Snapshot> handle;
+    std::uint64_t sequence;
+  };
+
+  TempDir dir;
+  tinylsm::Options options;
+  options.memtable_bytes = 1;
+  options.sstable_block_bytes = 40;
+  options.compaction_table_trigger = 0;
+  options.max_active_snapshots = 0;
+  auto opened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+  std::map<std::string, std::vector<Version>, std::less<>> model;
+  std::vector<SavedSnapshot> snapshots;
+  std::mt19937_64 random(0x4d56434320260908ULL);
+  constexpr std::array<std::string_view, 6> keys = {"a", "b", "c", "d", "e", "f"};
+  std::uint64_t next_sequence = 1;
+
+  const auto apply_model = [&](const tinylsm::WriteBatch::Operation& operation) {
+    model[operation.key].push_back(
+        {next_sequence++, operation.type == tinylsm::WriteBatch::OperationType::kPut
+                              ? std::optional<std::string>(operation.value)
+                              : std::nullopt});
+  };
+  const auto expected_view = [&](std::uint64_t sequence) {
+    std::vector<tinylsm::Entry> expected;
+    for (const auto& [key, versions] : model) {
+      const Version* visible = nullptr;
+      for (const auto& version : versions) {
+        if (version.sequence <= sequence)
+          visible = &version;
+      }
+      if (visible && visible->value)
+        expected.push_back({key, *visible->value});
+    }
+    return expected;
+  };
+  const auto verify_view = [&](const SavedSnapshot& saved, std::size_t operation) {
+    const auto expected = expected_view(saved.sequence);
+    for (const auto key : keys) {
+      const auto found = opened.value()->Get(key, saved.handle.get());
+      const auto it =
+          std::find_if(expected.begin(), expected.end(),
+                       [&](const tinylsm::Entry& entry) { return entry.key == key; });
+      SCOPED_TRACE("seed=0x4d56434320260908 operation=" + std::to_string(operation) +
+                   " snapshot=" + std::to_string(saved.sequence) +
+                   " key=" + std::string(key));
+      if (it == expected.end()) {
+        EXPECT_EQ(found.status().code(), tinylsm::StatusCode::kNotFound);
+      } else {
+        ASSERT_TRUE(found.ok()) << found.status().ToString();
+        EXPECT_EQ(found.value(), it->value);
+      }
+    }
+
+    auto iterator = opened.value()->NewIterator({}, {}, saved.handle.get());
+    ASSERT_TRUE(iterator.ok()) << iterator.status().ToString();
+    std::vector<tinylsm::Entry> actual;
+    while (iterator.value()->Valid()) {
+      actual.push_back({std::string(iterator.value()->key()),
+                        std::string(iterator.value()->value())});
+      ASSERT_TRUE(iterator.value()->Next().ok());
+    }
+    EXPECT_TRUE(iterator.value()->status().ok());
+    EXPECT_EQ(actual, expected);
+  };
+
+  for (std::size_t operation = 0; operation < 64; ++operation) {
+    tinylsm::WriteBatch batch;
+    const std::size_t count = 1 + random() % 3;
+    for (std::size_t index = 0; index < count; ++index) {
+      const auto key = keys[random() % keys.size()];
+      if ((random() % 4) == 0) {
+        batch.Delete(key);
+      } else {
+        batch.Put(key,
+                  "value-" + std::to_string(operation) + "-" + std::to_string(index));
+      }
+    }
+
+    if ((operation % 3) == 0 && batch.Count() == 1) {
+      const auto& entry = batch.Operations().front();
+      const auto status = entry.type == tinylsm::WriteBatch::OperationType::kPut
+                              ? opened.value()->Put(entry.key, entry.value)
+                              : opened.value()->Delete(entry.key);
+      ASSERT_TRUE(status.ok()) << status.ToString();
+    } else {
+      ASSERT_TRUE(opened.value()->Write(batch).ok());
+    }
+    for (const auto& entry : batch.Operations())
+      apply_model(entry);
+
+    if ((operation % 4) == 0) {
+      auto snapshot = opened.value()->GetSnapshot();
+      ASSERT_TRUE(snapshot.ok()) << snapshot.status().ToString();
+      snapshots.push_back({std::move(snapshot.value()), next_sequence - 1});
+    }
+    if ((operation % 8) == 7) {
+      ASSERT_TRUE(
+          tinylsm::internal::DBTestPeer::WaitForBackgroundWork(*opened.value()).ok());
+      ASSERT_TRUE(opened.value()->Compact().ok());
+    }
+    for (const auto& saved : snapshots)
+      verify_view(saved, operation);
+  }
+}
+
 TEST(BlockCacheTest, ReusesOnlySuccessfulValidatedBlocksAndCanBeDisabled) {
   TempDir dir;
   auto fs = tinylsm::internal::NewPosixFileSystem();
@@ -282,13 +727,15 @@ TEST(BlockCacheTest, ReusesOnlySuccessfulValidatedBlocksAndCanBeDisabled) {
   auto metrics = std::make_shared<tinylsm::internal::ReadMetricsState>();
   auto cache = std::make_shared<tinylsm::internal::BlockCache>(1024, metrics);
   auto plan = std::make_shared<tinylsm::test::FaultPlan>();
-  plan->Fail(FaultOperation::kReadAt, "000007.sst", 3);
+  // v2 detection probes the v1-sized tail, then reads the v2 footer, index,
+  // and properties before the first data block.
+  plan->Fail(FaultOperation::kReadAt, "000007.sst", 5);
   auto fault_fs = tinylsm::test::NewFaultInjectionFileSystem(plan);
   auto file = fault_fs->OpenRandomAccess(dir.path() / "000007.sst");
   ASSERT_TRUE(file.ok());
   auto reader = tinylsm::internal::SSTableReader::Open(std::move(file.value()), 7,
                                                        cache, metrics);
-  ASSERT_TRUE(reader.ok());
+  ASSERT_TRUE(reader.ok()) << reader.status().ToString();
 
   EXPECT_EQ(reader.value()->Get("a").status().code(), tinylsm::StatusCode::kIOError);
   ASSERT_TRUE(reader.value()->Get("a").ok());
@@ -459,20 +906,35 @@ TEST(BlockCacheTest, CompactionDropsOldTableEntriesBeforeReadersChange) {
   EXPECT_LE(after_read.cache_charge_bytes, after_read.cache_capacity_bytes);
 }
 
-TEST(SstableTest, PropertiesRejectIndexMismatchEmptyTableAndZeroSequence) {
+TEST(SstableTest, ReadsV1AndRejectsInvalidTableMetadata) {
   TempDir dir;
   auto fs = tinylsm::internal::NewPosixFileSystem();
   ASSERT_TRUE(fs->CreateDir(dir.path()).ok());
 
-  auto data = tinylsm::internal::EncodeDataBlock(
+  auto data = tinylsm::internal::EncodeDataBlockV1(
       {{"a", 1, tinylsm::internal::ValueType::kValue, "one"},
        {"z", 2, tinylsm::internal::ValueType::kValue, "two"}});
   ASSERT_TRUE(data.ok());
+  auto valid_index = tinylsm::internal::EncodeIndex(
+      {{"a", "z", 0, static_cast<std::uint64_t>(data.value().size())}});
+  ASSERT_TRUE(valid_index.ok());
+  const auto valid_footer = tinylsm::internal::EncodeFooterV1(
+      data.value().size(), valid_index.value().size());
+  {
+    std::ofstream output(dir.path() / "v1.sst", std::ios::binary);
+    output << data.value() << valid_index.value() << valid_footer;
+  }
+  auto valid_file = fs->OpenRandomAccess(dir.path() / "v1.sst");
+  ASSERT_TRUE(valid_file.ok());
+  auto valid = tinylsm::internal::SSTableReader::Open(std::move(valid_file.value()));
+  ASSERT_TRUE(valid.ok()) << valid.status().ToString();
+  EXPECT_EQ(valid.value()->Get("z").value().value, "two");
+
   auto index = tinylsm::internal::EncodeIndex(
       {{"b", "z", 0, static_cast<std::uint64_t>(data.value().size())}});
   ASSERT_TRUE(index.ok());
   const auto footer =
-      tinylsm::internal::EncodeFooter({data.value().size(), index.value().size()});
+      tinylsm::internal::EncodeFooterV1(data.value().size(), index.value().size());
   {
     std::ofstream output(dir.path() / "mismatch.sst", std::ios::binary);
     output << data.value() << index.value() << footer;
@@ -488,7 +950,7 @@ TEST(SstableTest, PropertiesRejectIndexMismatchEmptyTableAndZeroSequence) {
   auto empty_index = tinylsm::internal::EncodeIndex({});
   ASSERT_TRUE(empty_index.ok());
   const auto empty_footer =
-      tinylsm::internal::EncodeFooter({0, empty_index.value().size()});
+      tinylsm::internal::EncodeFooterV1(0, empty_index.value().size());
   {
     std::ofstream output(dir.path() / "empty.sst", std::ios::binary);
     output << empty_index.value() << empty_footer;
@@ -502,14 +964,7 @@ TEST(SstableTest, PropertiesRejectIndexMismatchEmptyTableAndZeroSequence) {
 
   auto zero = BuildTable(*fs, dir.path(), 2,
                          {{"key", 0, tinylsm::internal::ValueType::kValue, "value"}});
-  ASSERT_TRUE(zero.ok());
-  auto zero_file = fs->OpenRandomAccess(dir.path() / "000002.sst");
-  ASSERT_TRUE(zero_file.ok());
-  auto zero_reader =
-      tinylsm::internal::SSTableReader::Open(std::move(zero_file.value()));
-  ASSERT_TRUE(zero_reader.ok());
-  EXPECT_EQ(zero_reader.value()->ValidateAndGetProperties().status().code(),
-            tinylsm::StatusCode::kCorruption);
+  EXPECT_EQ(zero.status().code(), tinylsm::StatusCode::kInvalidArgument);
 }
 
 TEST(FileSystemTest, WritableFileRetriesShortWritesAndPropagatesPathErrors) {
@@ -859,6 +1314,86 @@ TEST(DBTest, ConcurrentCallersAreSerializedWithoutLosingWrites) {
   EXPECT_EQ(scan.value().size(), kThreads * kWritesPerThread);
 }
 
+TEST(GroupCommitTest, CombinesConcurrentRequestsWithoutLosingValues) {
+  TempDir dir;
+  tinylsm::Options options;
+  options.memtable_bytes = 64U * 1024U;
+  options.max_group_commit_requests = 4;
+  options.max_group_commit_bytes = 16U * 1024U;
+  auto opened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+  constexpr std::size_t kWriters = 4;
+  constexpr std::size_t kWritesPerWriter = 8;
+  std::barrier start(kWriters);
+  std::atomic<bool> writes_ok = true;
+  std::vector<std::thread> writers;
+  writers.reserve(kWriters);
+  for (std::size_t writer = 0; writer < kWriters; ++writer) {
+    writers.emplace_back([&, writer] {
+      start.arrive_and_wait();
+      for (std::size_t index = 0; index < kWritesPerWriter; ++index) {
+        const std::string key =
+            "writer-" + std::to_string(writer) + "-" + std::to_string(index);
+        if (!opened.value()->Put(key, "value-" + std::to_string(index)).ok()) {
+          writes_ok.store(false, std::memory_order_relaxed);
+          return;
+        }
+      }
+    });
+  }
+  for (auto& writer : writers)
+    writer.join();
+  ASSERT_TRUE(writes_ok.load(std::memory_order_relaxed));
+
+  const auto metrics = opened.value()->GetWriteMetrics();
+  constexpr std::uint64_t kRequests = kWriters * kWritesPerWriter;
+  EXPECT_EQ(metrics.grouped_write_requests, kRequests);
+  EXPECT_LT(metrics.group_commits, kRequests);
+  for (std::size_t writer = 0; writer < kWriters; ++writer)
+    for (std::size_t index = 0; index < kWritesPerWriter; ++index) {
+      const std::string key =
+          "writer-" + std::to_string(writer) + "-" + std::to_string(index);
+      EXPECT_EQ(opened.value()->Get(key).value(), "value-" + std::to_string(index));
+    }
+  ASSERT_TRUE(opened.value()->Close().ok());
+  auto reopened = tinylsm::DB::Open(dir.path(), options);
+  ASSERT_TRUE(reopened.ok()) << reopened.status().ToString();
+  auto recovered = reopened.value()->Scan({}, {});
+  ASSERT_TRUE(recovered.ok()) << recovered.status().ToString();
+  EXPECT_EQ(recovered.value().size(), kRequests);
+}
+
+TEST(GroupCommitTest, CloseWaitsForAnAdmittedGroupToFinishSyncing) {
+  TempDir dir;
+  auto sync_gate = std::make_shared<SyncGate>();
+  auto opened = tinylsm::internal::DBTestPeer::Open(
+      dir.path(), {}, std::make_unique<GateFileSystem>(nullptr, sync_gate));
+  ASSERT_TRUE(opened.ok()) << opened.status().ToString();
+
+  sync_gate->Arm();
+  tinylsm::Status write_status;
+  tinylsm::Status close_status;
+  std::thread writer([&] { write_status = opened.value()->Put("key", "value"); });
+  ASSERT_TRUE(sync_gate->WaitForSync());
+  std::thread closer([&] { close_status = opened.value()->Close(); });
+
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (!tinylsm::internal::DBTestPeer::WriterQueueStopping(*opened.value()) &&
+         std::chrono::steady_clock::now() < deadline) {
+    std::this_thread::yield();
+  }
+  EXPECT_TRUE(tinylsm::internal::DBTestPeer::WriterQueueStopping(*opened.value()));
+
+  sync_gate->Release();
+  writer.join();
+  closer.join();
+  EXPECT_TRUE(write_status.ok()) << write_status.ToString();
+  EXPECT_TRUE(close_status.ok()) << close_status.ToString();
+  EXPECT_EQ(opened.value()->Get("key").status().code(),
+            tinylsm::StatusCode::kAlreadyClosed);
+}
+
 TEST(DBTest, IncompleteWalBatchIsDiscardedInFull) {
   TempDir dir;
   {
@@ -1081,13 +1616,13 @@ TEST(DBTest, RepeatedFlushPreservesNewestValuesAcrossReopen) {
   EXPECT_EQ(reopened.value()->Get("b").status().code(), tinylsm::StatusCode::kNotFound);
 }
 
-TEST(DBTest, OpensAndReadsMultipleManifestTablesInOldestToNewestOrder) {
+TEST(DBTest, OpensMixedV1V2TablesAndCompactionRewritesThem) {
   TempDir dir;
   auto fs = tinylsm::internal::NewPosixFileSystem();
   ASSERT_TRUE(fs->CreateDir(dir.path()).ok());
-  auto oldest = BuildTable(*fs, dir.path(), 2,
-                           {{"a", 1, tinylsm::internal::ValueType::kValue, "old-a"},
-                            {"b", 2, tinylsm::internal::ValueType::kValue, "old-b"}});
+  auto oldest = BuildV1Table(*fs, dir.path(), 2,
+                             {{"a", 1, tinylsm::internal::ValueType::kValue, "old-a"},
+                              {"b", 2, tinylsm::internal::ValueType::kValue, "old-b"}});
   auto middle = BuildTable(*fs, dir.path(), 4,
                            {{"a", 3, tinylsm::internal::ValueType::kValue, "new-a"},
                             {"c", 4, tinylsm::internal::ValueType::kTombstone, ""}});
@@ -1117,6 +1652,9 @@ TEST(DBTest, OpensAndReadsMultipleManifestTablesInOldestToNewestOrder) {
 
   ASSERT_TRUE(opened.value()->Put("e", "from-wal").ok());
   EXPECT_EQ(opened.value()->Get("e").value(), "from-wal");
+  ASSERT_TRUE(opened.value()->Compact().ok());
+  EXPECT_EQ(opened.value()->Get("a").value(), "new-a");
+  EXPECT_EQ(opened.value()->Get("d").value(), "live-d");
   ASSERT_TRUE(opened.value()->Close().ok());
   opened.value().reset();
 

@@ -67,6 +67,11 @@ WriteMetrics internal::WriteMetricsState::Snapshot() const noexcept {
           LoadMetric(background_flush_failures),
           LoadMetric(backpressure_waits),
           LoadMetric(backpressure_wait_nanoseconds),
+          LoadMetric(group_commits),
+          LoadMetric(grouped_write_requests),
+          LoadMetric(writer_queue_wait_nanoseconds),
+          LoadMetric(writer_queue_depth),
+          LoadMetric(max_writer_queue_depth),
           LoadMetric(background_queue_depth),
           LoadMetric(max_background_queue_depth),
           LoadMetric(immutable_memtable_bytes),
@@ -98,7 +103,10 @@ DB::Impl::Open(const std::filesystem::path& path, Options options,
                std::unique_ptr<internal::FileSystem> fs) {
   if (path.empty())
     return Status::InvalidArgument("database path is empty");
-  if (options.memtable_bytes == 0 || options.sstable_block_bytes == 0)
+  if (options.memtable_bytes == 0 || options.sstable_block_bytes == 0 ||
+      options.sstable_restart_interval == 0 ||
+      options.max_pending_write_requests == 0 || options.max_pending_write_bytes == 0 ||
+      options.max_group_commit_requests == 0 || options.max_group_commit_bytes == 0)
     return Status::InvalidArgument("size options must be non-zero");
   if (options.compaction_table_trigger == 1)
     return Status::InvalidArgument(
@@ -115,6 +123,7 @@ DB::Impl::Open(const std::filesystem::path& path, Options options,
   impl->compaction_metrics_ = std::make_shared<internal::CompactionMetricsState>();
   impl->block_cache_ = std::make_shared<internal::BlockCache>(options.block_cache_bytes,
                                                               impl->read_metrics_);
+  impl->snapshot_state_ = std::make_shared<internal::SnapshotState>();
 
   auto s = impl->EnsureDatabaseDirectory();
   if (!s.ok())
@@ -370,109 +379,211 @@ Status DB::Impl::CheckOpen() const {
     return *terminal_error_;
   return background_error_.value_or(Status::Ok());
 }
-Status DB::Impl::Put(std::string_view k, std::string_view v) {
-  const auto lock_started = LockClock::now();
-  std::unique_lock lock(mutex_);
-  RecordWriteLockWait(read_metrics_, lock_started);
-  return WriteEntry(k, v, internal::ValueType::kValue, lock);
+struct DB::Impl::WriterRequest {
+  WriteBatch batch;
+  std::size_t queue_bytes = 0;
+  Status status;
+  bool complete = false;
+  std::condition_variable complete_cv;
+};
+
+Status DB::Impl::Put(std::string_view key, std::string_view value) {
+  WriteBatch batch;
+  batch.Put(key, value);
+  return SubmitWrite(std::move(batch));
 }
-Status DB::Impl::Delete(std::string_view k) {
-  const auto lock_started = LockClock::now();
-  std::unique_lock lock(mutex_);
-  RecordWriteLockWait(read_metrics_, lock_started);
-  return WriteEntry(k, {}, internal::ValueType::kTombstone, lock);
+Status DB::Impl::Delete(std::string_view key) {
+  WriteBatch batch;
+  batch.Delete(key);
+  return SubmitWrite(std::move(batch));
 }
-Status DB::Impl::WriteEntry(std::string_view key, std::string_view value,
-                            internal::ValueType type,
-                            std::unique_lock<std::shared_mutex>& lock) {
-  // A full second MemTable waits here until the one
-  // immutable generation is durably published or reports its sticky failure.
-  // This keeps both memory and the number of recoverable WALs bounded.
-  auto prepared = PrepareForWrite(lock);
-  if (!prepared.ok())
-    return prepared;
-  if (key.size() > options_.max_key_bytes || value.size() > options_.max_value_bytes)
-    return Status::InvalidArgument("key or value exceeds configured limit");
-
-  std::size_t projected = memtable_.ApproximateMemoryUsage();
-  auto existing = memtable_.Get(key);
-  if (existing.ok())
-    projected -= sizeof(internal::InternalEntry) + existing.value().user_key.size() +
-                 existing.value().value.size();
-  const std::size_t added = sizeof(internal::InternalEntry) + key.size() + value.size();
-  if (added > std::numeric_limits<std::size_t>::max() - projected)
-    return Status::ResourceExhausted("memtable size accounting overflow");
-  projected += added;
-
-  if (next_sequence_ == std::numeric_limits<std::uint64_t>::max())
-    return Status::ResourceExhausted("sequence space is exhausted");
-
-  internal::InternalEntry entry{std::string(key), next_sequence_++, type,
-                                std::string(value)};
-
-  if (wal_) {
-    auto s = wal_->Append(entry);
-    if (!s.ok())
-      return s;
-    if (options_.sync_on_write) {
-      s = wal_->Sync();
-      if (!s.ok())
-        return s;
-      write_metrics_->wal_syncs.fetch_add(1, std::memory_order_relaxed);
-    }
-  }
-
-  auto s = memtable_.Apply(std::move(entry));
-  if (!s.ok())
-    return s;
-
-  write_metrics_->writes.fetch_add(1, std::memory_order_relaxed);
-  write_metrics_->logical_write_bytes.fetch_add(key.size() + value.size(),
-                                                std::memory_order_relaxed);
-  if (manifest_ && memtable_.ApproximateMemoryUsage() >= options_.memtable_bytes &&
-      !immutable_memtable_)
-    return RotateMemTable();
-  return Status::Ok();
-}
-
-Status DB::Impl::Write(const WriteBatch& batch) {
-  const auto lock_started = LockClock::now();
-  std::unique_lock lock(mutex_);
-  RecordWriteLockWait(read_metrics_, lock_started);
-  auto prepared = PrepareForWrite(lock);
-  if (!prepared.ok())
-    return prepared;
+Status DB::Impl::ValidateWriteBatch(const WriteBatch& batch,
+                                    std::size_t& queue_bytes) const {
+  queue_bytes = 0;
   if (batch.Empty())
     return Status::Ok();
-  if (batch.Count() > internal::kMaxWalBatchOperations ||
-      batch.Count() > std::numeric_limits<std::uint64_t>::max() - next_sequence_) {
-    return Status::ResourceExhausted("batch exceeds sequence or operation limit");
-  }
+  if (batch.Count() > internal::kMaxWalBatchOperations)
+    return Status::ResourceExhausted("batch exceeds operation limit");
 
-  std::vector<internal::InternalEntry> entries;
-  entries.reserve(batch.Count());
-  std::uint64_t sequence = next_sequence_;
-  std::size_t added_bytes = 0;
-  std::uint64_t logical_bytes = 0;
   for (const auto& operation : batch.Operations()) {
     if (operation.key.size() > options_.max_key_bytes ||
         operation.value.size() > options_.max_value_bytes) {
       return Status::InvalidArgument("batch key or value exceeds configured limit");
     }
-    const auto bytes =
+    const std::size_t entry_bytes =
         sizeof(internal::InternalEntry) + operation.key.size() + operation.value.size();
-    if (bytes > std::numeric_limits<std::size_t>::max() - added_bytes)
+    if (entry_bytes > std::numeric_limits<std::size_t>::max() - queue_bytes)
       return Status::ResourceExhausted("batch size accounting overflow");
-    added_bytes += bytes;
-    logical_bytes += operation.key.size() + operation.value.size();
-
-    const auto type = operation.type == WriteBatch::OperationType::kPut
-                          ? internal::ValueType::kValue
-                          : internal::ValueType::kTombstone;
-    entries.push_back({operation.key, sequence++, type, operation.value});
+    queue_bytes += entry_bytes;
   }
-  if (added_bytes > internal::kMaxWalBatchBytes)
+  if (queue_bytes > internal::kMaxWalBatchBytes)
     return Status::InvalidArgument("batch exceeds encoded size limit");
+  return Status::Ok();
+}
+
+Status DB::Impl::SubmitWrite(WriteBatch batch) {
+  std::size_t queue_bytes = 0;
+  auto status = ValidateWriteBatch(batch, queue_bytes);
+  if (!status.ok())
+    return status;
+  if (batch.Empty()) {
+    std::shared_lock lock(mutex_);
+    return CheckOpen();
+  }
+  if (queue_bytes > options_.max_pending_write_bytes)
+    return Status::ResourceExhausted("batch exceeds bounded writer queue bytes");
+
+  const auto queued_at = LockClock::now();
+  auto request = std::make_shared<WriterRequest>();
+  request->batch = std::move(batch);
+  request->queue_bytes = queue_bytes;
+
+  std::unique_lock queue_lock(writer_mutex_);
+  while (!writer_stopping_ &&
+         (writer_queue_.size() >= options_.max_pending_write_requests ||
+          queue_bytes > options_.max_pending_write_bytes - writer_queue_bytes_)) {
+    writer_cv_.wait(queue_lock);
+  }
+  if (writer_stopping_)
+    return Status::AlreadyClosed("database is closing");
+
+  writer_queue_.push_back(request);
+  writer_queue_bytes_ += queue_bytes;
+  write_metrics_->writer_queue_depth.store(writer_queue_.size(),
+                                           std::memory_order_relaxed);
+  UpdateMaximum(write_metrics_->max_writer_queue_depth, writer_queue_.size());
+  if (!writer_leader_) {
+    writer_leader_ = true;
+    queue_lock.unlock();
+    DrainWriterQueue();
+    write_metrics_->writer_queue_wait_nanoseconds.fetch_add(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(LockClock::now() -
+                                                             queued_at)
+            .count(),
+        std::memory_order_relaxed);
+    return request->status;
+  }
+
+  request->complete_cv.wait(queue_lock, [&] { return request->complete; });
+  const auto result = request->status;
+  queue_lock.unlock();
+  write_metrics_->writer_queue_wait_nanoseconds.fetch_add(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(LockClock::now() - queued_at)
+          .count(),
+      std::memory_order_relaxed);
+  return result;
+}
+
+void DB::Impl::DrainWriterQueue() {
+  while (true) {
+    std::vector<std::shared_ptr<WriterRequest>> group;
+    {
+      std::unique_lock queue_lock(writer_mutex_);
+      if (writer_queue_.empty()) {
+        writer_leader_ = false;
+        write_metrics_->writer_queue_depth.store(0, std::memory_order_relaxed);
+        writer_cv_.notify_all();
+        return;
+      }
+
+      std::size_t group_bytes = 0;
+      std::size_t group_operations = 0;
+      while (!writer_queue_.empty()) {
+        const auto& candidate = writer_queue_.front();
+        const bool limit_reached =
+            !group.empty() &&
+            (group.size() >= options_.max_group_commit_requests ||
+             group_bytes >= options_.max_group_commit_bytes ||
+             candidate->queue_bytes > options_.max_group_commit_bytes - group_bytes ||
+             candidate->batch.Count() >
+                 internal::kMaxWalBatchOperations - group_operations);
+        if (limit_reached)
+          break;
+        group_bytes += candidate->queue_bytes;
+        group_operations += candidate->batch.Count();
+        group.push_back(candidate);
+        writer_queue_bytes_ -= candidate->queue_bytes;
+        writer_queue_.pop_front();
+      }
+      write_metrics_->writer_queue_depth.store(writer_queue_.size(),
+                                               std::memory_order_relaxed);
+      writer_cv_.notify_all();
+    }
+
+    Status status;
+    try {
+      status = ApplyWriteGroup(group);
+    } catch (...) {
+      const auto exception = std::current_exception();
+      const Status failure = Status::IOError("group commit aborted by exception");
+
+      std::unique_lock queue_lock(writer_mutex_);
+      const auto complete = [&](const std::shared_ptr<WriterRequest>& request) {
+        request->status = failure;
+        request->complete = true;
+        request->complete_cv.notify_one();
+      };
+      for (const auto& request : group)
+        complete(request);
+      while (!writer_queue_.empty()) {
+        complete(writer_queue_.front());
+        writer_queue_.pop_front();
+      }
+      writer_queue_bytes_ = 0;
+      writer_leader_ = false;
+      write_metrics_->writer_queue_depth.store(0, std::memory_order_relaxed);
+      writer_cv_.notify_all();
+      queue_lock.unlock();
+      std::rethrow_exception(exception);
+    }
+
+    std::unique_lock queue_lock(writer_mutex_);
+    for (const auto& request : group) {
+      request->status = status;
+      request->complete = true;
+      request->complete_cv.notify_one();
+    }
+  }
+}
+
+Status
+DB::Impl::ApplyWriteGroup(const std::vector<std::shared_ptr<WriterRequest>>& group) {
+  if (group.empty())
+    return Status::Ok();
+  const auto lock_started = LockClock::now();
+  std::unique_lock lock(mutex_);
+  RecordWriteLockWait(read_metrics_, lock_started);
+  auto prepared = PrepareForWrite(lock);
+  if (!prepared.ok())
+    return prepared;
+
+  std::vector<internal::InternalEntry> entries;
+  std::size_t operation_count = 0;
+  std::uint64_t logical_bytes = 0;
+  for (const auto& request : group) {
+    if (request->batch.Count() >
+        std::numeric_limits<std::size_t>::max() - operation_count)
+      return Status::ResourceExhausted("group operation count is exhausted");
+    operation_count += request->batch.Count();
+    for (const auto& operation : request->batch.Operations()) {
+      const auto bytes = static_cast<std::uint64_t>(operation.key.size()) +
+                         static_cast<std::uint64_t>(operation.value.size());
+      if (bytes > std::numeric_limits<std::uint64_t>::max() - logical_bytes)
+        return Status::ResourceExhausted("group logical bytes are exhausted");
+      logical_bytes += bytes;
+    }
+  }
+  if (operation_count > std::numeric_limits<std::uint64_t>::max() - next_sequence_)
+    return Status::ResourceExhausted("group exceeds sequence space");
+  entries.reserve(operation_count);
+  std::uint64_t sequence = next_sequence_;
+  for (const auto& request : group)
+    for (const auto& operation : request->batch.Operations()) {
+      const auto type = operation.type == WriteBatch::OperationType::kPut
+                            ? internal::ValueType::kValue
+                            : internal::ValueType::kTombstone;
+      entries.push_back({operation.key, sequence++, type, operation.value});
+    }
 
   if (wal_) {
     auto status = wal_->AppendBatch(entries);
@@ -491,14 +602,32 @@ Status DB::Impl::Write(const WriteBatch& batch) {
   if (!status.ok())
     return status;
 
-  write_metrics_->writes.fetch_add(batch.Count(), std::memory_order_relaxed);
-  write_metrics_->write_batches.fetch_add(1, std::memory_order_relaxed);
+  write_metrics_->writes.fetch_add(operation_count, std::memory_order_relaxed);
+  write_metrics_->write_batches.fetch_add(group.size(), std::memory_order_relaxed);
   write_metrics_->logical_write_bytes.fetch_add(logical_bytes,
                                                 std::memory_order_relaxed);
+  write_metrics_->group_commits.fetch_add(1, std::memory_order_relaxed);
+  write_metrics_->grouped_write_requests.fetch_add(group.size(),
+                                                   std::memory_order_relaxed);
   if (manifest_ && memtable_.ApproximateMemoryUsage() >= options_.memtable_bytes &&
       !immutable_memtable_)
     return RotateMemTable();
   return Status::Ok();
+}
+
+Status DB::Impl::Write(const WriteBatch& batch) { return SubmitWrite(batch); }
+
+void DB::Impl::StopWriterQueue() noexcept {
+  std::unique_lock lock(writer_mutex_);
+  writer_stopping_ = true;
+  writer_cv_.wait(lock, [&] { return !writer_leader_; });
+}
+
+void DB::Impl::ResumeWriterQueue() noexcept {
+  std::scoped_lock lock(writer_mutex_);
+  if (!closed_)
+    writer_stopping_ = false;
+  writer_cv_.notify_all();
 }
 
 Status DB::Impl::PrepareForWrite(std::unique_lock<std::shared_mutex>& lock) {
@@ -617,7 +746,8 @@ Status DB::Impl::FlushImmutableMemTable() {
   if (!file.ok())
     return file.status().WithContext("create temporary immutable SSTable");
   internal::SSTableBuilder builder(std::move(file.value()),
-                                   options_.sstable_block_bytes);
+                                   options_.sstable_block_bytes,
+                                   options_.sstable_restart_interval);
   for (const auto& entry : entries) {
     auto status = builder.Add(entry);
     if (!status.ok())
@@ -796,111 +926,75 @@ void DB::Impl::WaitForBackgroundWork(std::unique_lock<std::shared_mutex>& lock) 
 }
 
 Result<std::string> DB::Impl::Get(std::string_view key) const {
+  return Get(key, nullptr);
+}
+
+Result<std::string> DB::Impl::Get(std::string_view key,
+                                  const Snapshot* snapshot) const {
   const auto lock_started = LockClock::now();
   std::shared_lock lock(mutex_);
   RecordReadLockWait(read_metrics_, lock_started);
   auto s = CheckOpen();
   if (!s.ok())
     return s;
+  if (snapshot && snapshot->state_ != snapshot_state_)
+    return Status::InvalidArgument("Snapshot belongs to another DB");
   read_metrics_->point_lookups.fetch_add(1, std::memory_order_relaxed);
+  const auto sequence = snapshot ? snapshot->sequence() : next_sequence_ - 1;
+  std::optional<internal::InternalEntry> newest;
+  const auto consider = [&newest](Result<internal::InternalEntry> candidate) -> Status {
+    if (!candidate.ok()) {
+      if (candidate.status().code() == StatusCode::kNotFound)
+        return Status::Ok();
+      return candidate.status();
+    }
+    if (!newest || candidate.value().sequence > newest->sequence)
+      newest = std::move(candidate.value());
+    return Status::Ok();
+  };
 
-  auto mem = memtable_.Get(key);
-  if (mem.ok())
-    return mem.value().type == internal::ValueType::kTombstone
-               ? Result<std::string>(Status::NotFound("key was deleted"))
-               : Result<std::string>(mem.value().value);
-  if (mem.status().code() != StatusCode::kNotFound)
-    return mem.status();
+  s = consider(memtable_.Get(key, sequence));
+  if (!s.ok())
+    return s;
 
   if (immutable_memtable_) {
-    auto immutable = immutable_memtable_->Get(key);
-    if (immutable.ok())
-      return immutable.value().type == internal::ValueType::kTombstone
-                 ? Result<std::string>(Status::NotFound("key was deleted"))
-                 : Result<std::string>(immutable.value().value);
-    if (immutable.status().code() != StatusCode::kNotFound)
-      return immutable.status();
+    s = consider(immutable_memtable_->Get(key, sequence));
+    if (!s.ok())
+      return s;
   }
 
   if (manifest_ && manifest_->current().live_tables.size() != tables_.size())
     return Status::Corruption("Manifest and Reader table sets differ");
 
   const internal::BytewiseLess less;
-  for (std::size_t i = tables_.size(); i > 0; --i) {
-    const auto& meta = manifest_->current().live_tables[i - 1];
+  for (std::size_t i = 0; i < tables_.size(); ++i) {
+    const auto& meta = manifest_->current().live_tables[i];
     if (less(key, meta.smallest_key) || less(meta.largest_key, key))
       continue;
-    auto disk = tables_[i - 1]->Get(key);
-    if (!disk.ok()) {
-      if (disk.status().code() == StatusCode::kNotFound) {
-        continue;
-      }
-      return disk.status();
-    }
-    if (disk.value().type == internal::ValueType::kTombstone)
-      return Status::NotFound("key was deleted");
-    return disk.value().value;
+    s = consider(tables_[i]->Get(key, sequence));
+    if (!s.ok())
+      return s;
   }
 
-  return Status::NotFound("key is absent");
+  if (!newest || newest->type == internal::ValueType::kTombstone)
+    return Status::NotFound("key is absent or deleted");
+  return newest->value;
 }
 Result<std::vector<Entry>> DB::Impl::Scan(std::string_view begin,
                                           std::string_view end) const {
-  const auto lock_started = LockClock::now();
-  std::shared_lock lock(mutex_);
-  RecordReadLockWait(read_metrics_, lock_started);
-  auto s = CheckOpen();
-  if (!s.ok())
-    return s;
-  read_metrics_->range_scans.fetch_add(1, std::memory_order_relaxed);
-  const internal::BytewiseLess less;
-  if (!end.empty() && less(end, begin))
-    return Status::InvalidArgument("scan begin is greater than end");
-  if (manifest_ && manifest_->current().live_tables.size() != tables_.size())
-    return Status::Corruption("Manifest and Reader table sets differ");
-
-  std::vector<std::unique_ptr<internal::InternalIterator>> inputs;
-  inputs.reserve(tables_.size() + 2);
-
-  for (std::size_t i = 0; i < tables_.size(); ++i) {
-    const auto& meta = manifest_->current().live_tables[i];
-    if ((!end.empty() && !less(meta.smallest_key, end)) ||
-        less(meta.largest_key, begin))
-      continue;
-    auto disk = tables_[i]->NewIterator(begin, end);
-    if (!disk.ok())
-      return disk.status();
-    inputs.push_back(std::move(disk.value()));
-    read_metrics_->scan_table_inputs.fetch_add(1, std::memory_order_relaxed);
-  }
-
-  auto memory = memtable_.NewIterator(begin, end);
-  if (!memory.ok())
-    return memory.status();
-  inputs.push_back(std::move(memory.value()));
-
-  if (immutable_memtable_) {
-    auto immutable = immutable_memtable_->NewIterator(begin, end);
-    if (!immutable.ok())
-      return immutable.status();
-    inputs.push_back(std::move(immutable.value()));
-  }
-
-  auto merged = internal::NewMergingIterator(std::move(inputs));
-  if (!merged.ok())
-    return merged.status();
-
+  auto iterator = NewIterator(begin, end, nullptr);
+  if (!iterator.ok())
+    return iterator.status();
   std::vector<Entry> out;
-  while (merged.value()->Valid()) {
-    const auto& entry = merged.value()->entry();
-    if (entry.type == internal::ValueType::kValue)
-      out.push_back({entry.user_key, entry.value});
-    auto next = merged.value()->Next();
+  while (iterator.value()->Valid()) {
+    out.push_back(
+        {std::string(iterator.value()->key()), std::string(iterator.value()->value())});
+    auto next = iterator.value()->Next();
     if (!next.ok())
       return next;
   }
-  if (!merged.value()->status().ok())
-    return merged.value()->status();
+  if (!iterator.value()->status().ok())
+    return iterator.value()->status();
   return out;
 }
 
@@ -914,6 +1008,15 @@ WriteMetrics DB::Impl::GetWriteMetrics() const noexcept {
 
 CompactionMetrics DB::Impl::GetCompactionMetrics() const noexcept {
   return compaction_metrics_ ? compaction_metrics_->Snapshot() : CompactionMetrics{};
+}
+
+SnapshotMetrics DB::Impl::GetSnapshotMetrics() const noexcept {
+  if (!snapshot_state_)
+    return {};
+  const auto active = snapshot_state_->ActiveCount();
+  return {active, active == 0 ? 0 : snapshot_state_->OldestOr(0),
+          snapshot_state_->last_full_compaction_retained_versions(),
+          snapshot_state_->last_full_compaction_retained_bytes()};
 }
 
 Status DB::Impl::Compact() {
@@ -974,6 +1077,7 @@ Status DB::Impl::CompactTablePrefix(std::size_t input_count, bool background) {
   std::vector<internal::TableMeta> selected_meta;
   std::vector<std::shared_ptr<internal::SSTableReader>> selected_tables;
   std::uint64_t replacement_number = 0;
+  bool compaction_covers_all_tables = false;
 
   std::unique_lock<std::shared_mutex> version_lock(mutex_);
   {
@@ -996,6 +1100,7 @@ Status DB::Impl::CompactTablePrefix(std::size_t input_count, bool background) {
     selected_meta.assign(selected_snapshot.live_tables.begin(),
                          selected_snapshot.live_tables.begin() + input_count);
     selected_tables.assign(tables_.begin(), tables_.begin() + input_count);
+    compaction_covers_all_tables = input_count == selected_snapshot.live_tables.size();
 
     if (background) {
       // Reserve the output number before releasing the version lock. A flush
@@ -1034,17 +1139,56 @@ Status DB::Impl::CompactTablePrefix(std::size_t input_count, bool background) {
   const auto temp = *path_ / internal::SstableTempFileName(replacement_number);
   const auto final = *path_ / internal::SstableFileName(replacement_number);
   std::unique_ptr<internal::SSTableBuilder> builder;
+  const auto no_snapshot = std::numeric_limits<std::uint64_t>::max();
+  const auto watermark = snapshot_state_->OldestOr(no_snapshot);
+  std::string previous_key;
+  bool first_for_key = true;
+  bool retained_watermark_version = false;
+  std::uint64_t retained_versions = 0;
+  std::uint64_t retained_bytes = 0;
   while (merged.value()->Valid()) {
     const auto& entry = merged.value()->entry();
-    // The selected run is the oldest table prefix, so no unselected table can
-    // contain an older value that requires this tombstone to remain.
-    if (entry.type == internal::ValueType::kValue) {
+    if (first_for_key || entry.user_key != previous_key) {
+      previous_key = entry.user_key;
+      first_for_key = false;
+      retained_watermark_version = false;
+    }
+
+    bool retain = !compaction_covers_all_tables;
+    if (compaction_covers_all_tables) {
+      if (watermark == no_snapshot) {
+        // Without a historical reader, only the latest live value can affect
+        // future reads; a latest tombstone and every older version are dead.
+        retain =
+            !retained_watermark_version && entry.type == internal::ValueType::kValue;
+        retained_watermark_version = true;
+      } else if (entry.sequence > watermark) {
+        // Any active snapshot is at or after the watermark, so it may observe
+        // one of these newer versions.
+        retain = true;
+      } else if (!retained_watermark_version) {
+        // Keep the one version visible to the oldest active snapshot.
+        retain = true;
+        retained_watermark_version = true;
+      }
+    }
+    if (retain) {
+      if (compaction_covers_all_tables) {
+        ++retained_versions;
+        const auto entry_bytes = static_cast<std::uint64_t>(entry.user_key.size()) +
+                                 static_cast<std::uint64_t>(entry.value.size());
+        retained_bytes =
+            entry_bytes > std::numeric_limits<std::uint64_t>::max() - retained_bytes
+                ? std::numeric_limits<std::uint64_t>::max()
+                : retained_bytes + entry_bytes;
+      }
       if (!builder) {
         auto file = fs_->OpenWritable(temp, false);
         if (!file.ok())
           return file.status().WithContext("create temporary compacted SSTable");
         builder = std::make_unique<internal::SSTableBuilder>(
-            std::move(file.value()), options_.sstable_block_bytes);
+            std::move(file.value()), options_.sstable_block_bytes,
+            options_.sstable_restart_interval);
       }
       auto status = builder->Add(entry);
       if (!status.ok())
@@ -1136,6 +1280,9 @@ Status DB::Impl::CompactTablePrefix(std::size_t input_count, bool background) {
     tables_.erase(tables_.begin(), tables_.begin() + selected_meta.size());
     if (replacement_reader)
       tables_.insert(tables_.begin(), std::move(replacement_reader));
+    if (compaction_covers_all_tables)
+      snapshot_state_->SetLastFullCompactionRetention(retained_versions,
+                                                      retained_bytes);
     compaction_metrics_->compactions.fetch_add(1, std::memory_order_relaxed);
     if (background)
       compaction_metrics_->background_compactions.fetch_add(1,
@@ -1254,6 +1401,7 @@ void DB::Impl::CleanupObsoleteFiles() noexcept {
 }
 
 Status DB::Impl::Close() {
+  StopWriterQueue();
   const auto lock_started = LockClock::now();
   std::unique_lock lock(mutex_);
   RecordWriteLockWait(read_metrics_, lock_started);
@@ -1300,6 +1448,8 @@ Status DB::Impl::Close() {
     if (!s.ok()) {
       closing_ = false;
       background_cv_.notify_all();
+      lock.unlock();
+      ResumeWriterQueue();
       return s.WithContext("close database: sync WAL");
     }
   }

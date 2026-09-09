@@ -123,6 +123,40 @@ TEST(MemTableTest, PreservesEmptyValueTombstoneAndSequenceRules) {
   EXPECT_FALSE(table.Get("missing").ok());
 }
 
+TEST(MemTableTest, ApplyBatchStagesOnlyTouchedKeysAndCommitsVersionOrderAtomically) {
+  ti::MemTable table;
+  ASSERT_TRUE(table.Apply({"existing", 4, ti::ValueType::kValue, "old"}).ok());
+  ASSERT_TRUE(table.Apply({"untouched", 3, ti::ValueType::kValue, "stable"}).ok());
+
+  const std::vector<ti::InternalEntry> batch{
+      {"new", 5, ti::ValueType::kValue, "first"},
+      {"existing", 6, ti::ValueType::kTombstone, ""},
+      {"new", 7, ti::ValueType::kValue, "latest"},
+  };
+  ASSERT_TRUE(table.ApplyBatch(batch).ok());
+
+  ASSERT_TRUE(table.Get("new").ok());
+  EXPECT_EQ(table.Get("new").value().value, "latest");
+  ASSERT_TRUE(table.Get("new", 5).ok());
+  EXPECT_EQ(table.Get("new", 5).value().value, "first");
+  ASSERT_TRUE(table.Get("existing").ok());
+  EXPECT_EQ(table.Get("existing").value().type, ti::ValueType::kTombstone);
+  ASSERT_TRUE(table.Get("existing", 4).ok());
+  EXPECT_EQ(table.Get("existing", 4).value().value, "old");
+  EXPECT_EQ(table.Get("untouched").value().value, "stable");
+
+  const auto bytes_before_failure = table.ApproximateMemoryUsage();
+  const std::vector<ti::InternalEntry> invalid{
+      {"would-appear", 8, ti::ValueType::kValue, "no"},
+      {"existing", 2, ti::ValueType::kValue, "out-of-order"},
+  };
+  EXPECT_EQ(table.ApplyBatch(invalid).code(), tinylsm::StatusCode::kCorruption);
+  EXPECT_EQ(table.Get("would-appear").status().code(), tinylsm::StatusCode::kNotFound);
+  EXPECT_EQ(table.Get("existing").value().type, ti::ValueType::kTombstone);
+  EXPECT_EQ(table.Get("untouched").value().value, "stable");
+  EXPECT_EQ(table.ApproximateMemoryUsage(), bytes_before_failure);
+}
+
 TEST(WalCodecTest, HasStableHeaderAndRejectsCorruptionAndLimits) {
   ti::InternalEntry entry{"k", 1, ti::ValueType::kValue, "v"};
   auto encoded = ti::EncodeWalRecord(entry, {});
@@ -316,27 +350,44 @@ TEST(WalReaderTest, EnforcesPublishedFloorAndStrictlyIncreasingSequence) {
   }
 }
 
-TEST(SstableFormatTest, ChecksOrderingAndIndependentChecksums) {
-  std::vector<ti::InternalEntry> entries{{"a", 3, ti::ValueType::kValue, "one"},
-                                         {"z", 4, ti::ValueType::kTombstone, ""}};
-  auto encoded = ti::EncodeDataBlock(entries);
-  ASSERT_TRUE(encoded.ok());
+TEST(SstableFormatTest, RoundTripsV2PrefixBlocksPropertiesAndV1Footer) {
+  std::vector<ti::InternalEntry> entries{
+      {"account/001", 3, ti::ValueType::kValue, "one"},
+      {"account/002", 2, ti::ValueType::kValue, "two"},
+      {"account/003", 1, ti::ValueType::kTombstone, ""}};
+  auto encoded = ti::EncodeDataBlock(entries, 2);
+  ASSERT_TRUE(encoded.ok()) << encoded.status().ToString();
   auto decoded = ti::DecodeDataBlock(ti::AsBytes(encoded.value()));
-  ASSERT_TRUE(decoded.ok());
+  ASSERT_TRUE(decoded.ok()) << decoded.status().ToString();
   EXPECT_EQ(decoded.value(), entries);
+  auto found = ti::FindDataBlockEntry(ti::AsBytes(encoded.value()), ti::kSstableVersion,
+                                      "account/002", 2);
+  ASSERT_TRUE(found.ok()) << found.status().ToString();
+  EXPECT_EQ(found.value(), entries[1]);
+
+  auto properties = ti::EncodeProperties({3, "account/001", "account/003", 1, 3});
+  ASSERT_TRUE(properties.ok()) << properties.status().ToString();
+  auto decoded_properties = ti::DecodeProperties(ti::AsBytes(properties.value()));
+  ASSERT_TRUE(decoded_properties.ok()) << decoded_properties.status().ToString();
+  EXPECT_EQ(decoded_properties.value().entry_count, 3U);
+  EXPECT_EQ(decoded_properties.value().smallest_key, "account/001");
+  EXPECT_EQ(decoded_properties.value().largest_key, "account/003");
+  properties.value()[0] ^= 1;
+  EXPECT_EQ(ti::DecodeProperties(ti::AsBytes(properties.value())).status().code(),
+            tinylsm::StatusCode::kCorruption);
+
+  auto v2_footer = ti::EncodeFooter({ti::kSstableVersion, 10, 20, 30, 40});
+  ASSERT_TRUE(ti::DecodeFooter(ti::AsBytes(v2_footer)).ok());
+  v2_footer[0] ^= 1;
+  EXPECT_EQ(ti::DecodeFooter(ti::AsBytes(v2_footer)).status().code(),
+            tinylsm::StatusCode::kCorruption);
+  auto v1_footer = ti::EncodeFooterV1(10, 20);
+  auto decoded_v1_footer = ti::DecodeFooter(ti::AsBytes(v1_footer));
+  ASSERT_TRUE(decoded_v1_footer.ok());
+  EXPECT_EQ(decoded_v1_footer.value().version, ti::kSstableVersionV1);
+
   encoded.value()[0] ^= 1;
   EXPECT_EQ(ti::DecodeDataBlock(ti::AsBytes(encoded.value())).status().code(),
-            tinylsm::StatusCode::kCorruption);
-
-  auto index = ti::EncodeIndex({{"a", "z", 0, 100}});
-  ASSERT_TRUE(index.ok());
-  index.value().back() ^= 1;
-  EXPECT_EQ(ti::DecodeIndex(ti::AsBytes(index.value())).status().code(),
-            tinylsm::StatusCode::kCorruption);
-
-  auto footer = ti::EncodeFooter({10, 20});
-  footer[4] ^= 1;
-  EXPECT_EQ(ti::DecodeFooter(ti::AsBytes(footer)).status().code(),
             tinylsm::StatusCode::kCorruption);
 }
 

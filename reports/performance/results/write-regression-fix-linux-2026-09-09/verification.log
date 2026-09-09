@@ -1,0 +1,13 @@
+TinyLSM/SnapshotWriterOverlapMaterializedScan	real_time_cv_percent=9.309
+TinyLSM/SnapshotWriterOverlapIterator	real_time_cv_percent=0.158
+TinyLSM/GroupCommitOff1Writers	real_time_cv_percent=2.392
+TinyLSM/GroupCommitOn1Writers	real_time_cv_percent=1.471
+TinyLSM/GroupCommitOff2Writers	real_time_cv_percent=3.310
+TinyLSM/GroupCommitOn2Writers	real_time_cv_percent=2.533
+TinyLSM/GroupCommitOff4Writers	real_time_cv_percent=3.659
+TinyLSM/GroupCommitOn4Writers	real_time_cv_percent=1.160
+TinyLSM/GroupCommitOff8Writers	real_time_cv_percent=2.297
+TinyLSM/GroupCommitOn8Writers	real_time_cv_percent=2.453
+TinyLSM/GroupCommitOff16Writers	real_time_cv_percent=1.081
+TinyLSM/GroupCommitOn16Writers	real_time_cv_percent=3.005
+verified 12 median cases in each run; all CV <= 10.0%

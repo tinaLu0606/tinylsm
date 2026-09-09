@@ -101,7 +101,7 @@ TEST(MemTableIteratorTest, BorrowsEntriesAndHonorsBytewiseHalfOpenRange) {
   EXPECT_TRUE(empty.value()->status().ok());
 }
 
-TEST(MergingIteratorTest, SelectsNewestSequenceAndKeepsTombstonesOrdered) {
+TEST(MergingIteratorTest, OrdersEveryVersionByUserKeyThenSequenceDescending) {
   std::vector<std::unique_ptr<InternalIterator>> inputs;
   inputs.push_back(MakeIterator({{"a", 1, ValueType::kValue, "old-a"},
                                  {"b", 2, ValueType::kValue, "old-b"},
@@ -119,10 +119,34 @@ TEST(MergingIteratorTest, SelectsNewestSequenceAndKeepsTombstonesOrdered) {
   }
 
   EXPECT_EQ(actual, (std::vector<InternalEntry>{{"a", 4, ValueType::kValue, "new-a"},
+                                                {"a", 1, ValueType::kValue, "old-a"},
                                                 {"b", 5, ValueType::kTombstone, ""},
+                                                {"b", 2, ValueType::kValue, "old-b"},
                                                 {"c", 6, ValueType::kValue, "live-c"},
                                                 {"d", 3, ValueType::kValue, "old-d"}}));
   EXPECT_TRUE(merged.value()->status().ok());
+}
+
+TEST(MergingIteratorTest, FiltersVersionsForTheRequestedSnapshotSequence) {
+  std::vector<std::unique_ptr<InternalIterator>> inputs;
+  inputs.push_back(MakeIterator(
+      {{"a", 1, ValueType::kValue, "old-a"}, {"b", 2, ValueType::kValue, "old-b"}}));
+  inputs.push_back(MakeIterator({{"a", 4, ValueType::kValue, "new-a"},
+                                 {"b", 5, ValueType::kTombstone, ""},
+                                 {"c", 6, ValueType::kValue, "live-c"}}));
+  auto merged = tinylsm::internal::NewMergingIterator(std::move(inputs));
+  ASSERT_TRUE(merged.ok()) << merged.status().ToString();
+  auto visible = tinylsm::internal::NewVisibilityIterator(std::move(merged.value()), 3);
+  ASSERT_TRUE(visible.ok()) << visible.status().ToString();
+
+  std::vector<InternalEntry> actual;
+  while (visible.value()->Valid()) {
+    actual.push_back(visible.value()->entry());
+    ASSERT_TRUE(visible.value()->Next().ok());
+  }
+  EXPECT_EQ(actual, (std::vector<InternalEntry>{{"a", 1, ValueType::kValue, "old-a"},
+                                                {"b", 2, ValueType::kValue, "old-b"}}));
+  EXPECT_TRUE(visible.value()->status().ok());
 }
 
 TEST(MergingIteratorTest, RejectsDuplicateSequenceAndMakesErrorsSticky) {
@@ -165,7 +189,9 @@ TEST(SstableIteratorTest, LoadsBlocksLazilyAndMakesReadFailureSticky) {
   ASSERT_TRUE(builder.Finish().ok());
 
   auto plan = std::make_shared<FaultPlan>();
-  plan->Fail(FaultOperation::kReadAt, "table.sst", 4);
+  // v2 open probes v1 footer bytes, then reads the v2 footer, index, and
+  // properties. The first block is read by Seek; fail the second lazy block.
+  plan->Fail(FaultOperation::kReadAt, "table.sst", 6);
   auto fault_fs = tinylsm::test::NewFaultInjectionFileSystem(plan);
   auto random = fault_fs->OpenRandomAccess(dir.path() / "table.sst");
   ASSERT_TRUE(random.ok());
@@ -198,7 +224,9 @@ TEST(DBIteratorTest, LateSstableReadFailureReturnsNoPartialScanResult) {
   }
 
   auto plan = std::make_shared<FaultPlan>();
-  plan->Fail(FaultOperation::kReadAt, ".sst", 7);
+  // The v2 footer/properties add two open-time reads before validation and
+  // the later lazy Scan read.
+  plan->Fail(FaultOperation::kReadAt, ".sst", 9);
   auto opened = tinylsm::internal::DBTestPeer::Open(
       dir.path(), options, tinylsm::test::NewFaultInjectionFileSystem(plan));
   ASSERT_TRUE(opened.ok()) << opened.status().ToString();

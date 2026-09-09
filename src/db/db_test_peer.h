@@ -46,6 +46,14 @@ public:
     db.impl_->compaction_requested_ = true;
     db.impl_->background_cv_.notify_all();
   }
+
+  /// Returns whether Close() has stopped further writer-queue admission. This
+  /// read-only seam lets a deterministic test hold an admitted WAL Sync while
+  /// proving Close waits for the active leader.
+  static bool WriterQueueStopping(const DB& db) {
+    std::scoped_lock lock(db.impl_->writer_mutex_);
+    return db.impl_->writer_stopping_;
+  }
 };
 
 } // namespace tinylsm::internal

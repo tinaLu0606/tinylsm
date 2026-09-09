@@ -14,6 +14,7 @@ namespace tinylsm::internal {
 
 struct BuiltTableInfo {
   std::uint64_t file_size = 0;
+  std::uint64_t entry_count = 0;
   std::string smallest_key;
   std::string largest_key;
   std::uint64_t min_sequence = 0;
@@ -23,8 +24,10 @@ struct BuiltTableInfo {
 /// Builds one immutable SSTable from entries supplied in strict key order.
 class SSTableBuilder {
 public:
-  SSTableBuilder(std::unique_ptr<WritableFile> file, std::size_t block_bytes)
-      : file_(std::move(file)), block_bytes_(block_bytes) {}
+  SSTableBuilder(std::unique_ptr<WritableFile> file, std::size_t block_bytes,
+                 std::uint32_t restart_interval = kDefaultRestartInterval)
+      : file_(std::move(file)), block_bytes_(block_bytes),
+        restart_interval_(restart_interval) {}
 
   /// Adds one entry. Keys must strictly increase across all calls.
   Status Add(InternalEntry entry);
@@ -37,6 +40,7 @@ private:
   Status FlushBlock();
   std::unique_ptr<WritableFile> file_;
   std::size_t block_bytes_;
+  std::uint32_t restart_interval_;
   std::vector<InternalEntry> pending_;
   std::size_t pending_bytes_ = 0;
   std::vector<BlockMeta> blocks_;

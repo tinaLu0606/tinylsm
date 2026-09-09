@@ -13,7 +13,7 @@ public:
   Iterator(const SSTableReader& source, std::string_view end)
       : source_(source), end_(end), block_index_(source.blocks_.size()) {}
 
-  Status Seek(std::string_view begin) {
+  Status Seek(std::string_view begin) override {
     const BytewiseLess less;
     block_index_ = 0;
     while (block_index_ < source_.blocks_.size() &&
@@ -119,38 +119,71 @@ SSTableReader::Open(std::unique_ptr<RandomAccessFile> file, std::uint64_t table_
   auto size = file->Size();
   if (!size.ok())
     return size.status();
-  if (size.value() < kSstableFooterSize)
+  if (size.value() < kSstableV1FooterSize)
     return Status::Corruption("SSTable is too short");
 
-  std::vector<std::byte> footer_bytes(kSstableFooterSize);
-  auto s = ReadExactly(*file, size.value() - kSstableFooterSize, footer_bytes);
+  std::vector<std::byte> v1_footer_bytes(kSstableV1FooterSize);
+  auto s = ReadExactly(*file, size.value() - kSstableV1FooterSize, v1_footer_bytes);
   if (!s.ok())
     return s;
-  auto footer = DecodeFooter(footer_bytes);
-  if (!footer.ok())
-    return footer.status();
+  auto v1_footer = DecodeFooter(v1_footer_bytes);
+  Footer footer;
+  if (v1_footer.ok()) {
+    footer = v1_footer.value();
+  } else {
+    if (size.value() < kSstableFooterSize)
+      return v1_footer.status();
+    std::vector<std::byte> v2_footer_bytes(kSstableFooterSize);
+    s = ReadExactly(*file, size.value() - kSstableFooterSize, v2_footer_bytes);
+    if (!s.ok())
+      return s;
+    auto v2_footer = DecodeFooter(v2_footer_bytes);
+    if (!v2_footer.ok())
+      return v2_footer.status();
+    footer = v2_footer.value();
+  }
+  const std::size_t footer_size =
+      footer.version == kSstableVersionV1 ? kSstableV1FooterSize : kSstableFooterSize;
+  const std::uint64_t sections_end = size.value() - footer_size;
 
-  if (footer.value().index_offset > size.value() - kSstableFooterSize ||
-      footer.value().index_size >
-          size.value() - kSstableFooterSize - footer.value().index_offset)
+  if (footer.index_offset > sections_end ||
+      footer.index_size > sections_end - footer.index_offset)
     return Status::Corruption("SSTable index range is invalid");
-  if (footer.value().index_offset + footer.value().index_size !=
-      size.value() - kSstableFooterSize)
-    return Status::Corruption("SSTable contains unreferenced bytes");
+  if (footer.version == kSstableVersionV1) {
+    if (footer.index_offset + footer.index_size != sections_end)
+      return Status::Corruption("v1 SSTable contains unreferenced bytes");
+  } else if (footer.index_offset + footer.index_size != footer.properties_offset ||
+             footer.properties_offset > sections_end ||
+             footer.properties_size > sections_end - footer.properties_offset ||
+             footer.properties_offset + footer.properties_size != sections_end) {
+    return Status::Corruption("v2 SSTable section ranges are invalid");
+  }
 
-  std::vector<std::byte> index_bytes(footer.value().index_size);
-  s = ReadExactly(*file, footer.value().index_offset, index_bytes);
+  std::vector<std::byte> index_bytes(footer.index_size);
+  s = ReadExactly(*file, footer.index_offset, index_bytes);
   if (!s.ok())
     return s;
   auto blocks = DecodeIndex(index_bytes);
   if (!blocks.ok())
     return blocks.status();
 
+  std::optional<TableProperties> persisted_properties;
+  if (footer.version == kSstableVersion) {
+    std::vector<std::byte> properties_bytes(footer.properties_size);
+    s = ReadExactly(*file, footer.properties_offset, properties_bytes);
+    if (!s.ok())
+      return s;
+    auto properties = DecodeProperties(properties_bytes);
+    if (!properties.ok())
+      return properties.status();
+    persisted_properties = std::move(properties.value());
+  }
   for (const auto& b : blocks.value())
-    if (b.offset > b.offset + b.size || b.offset + b.size > footer.value().index_offset)
+    if (b.offset > footer.index_offset || b.size > footer.index_offset - b.offset)
       return Status::Corruption("SSTable block range is invalid");
   return std::unique_ptr<SSTableReader>(
-      new SSTableReader(std::move(file), size.value(), std::move(blocks.value()),
+      new SSTableReader(std::move(file), size.value(), footer.version,
+                        std::move(blocks.value()), std::move(persisted_properties),
                         table_number, std::move(block_cache), std::move(metrics)));
 }
 Result<BlockCache::BlockPtr> SSTableReader::ReadBlock(const BlockMeta& m,
@@ -170,7 +203,7 @@ Result<BlockCache::BlockPtr> SSTableReader::ReadBlock(const BlockMeta& m,
     return s;
   if (metrics_)
     metrics_->block_reads.fetch_add(1, std::memory_order_relaxed);
-  auto entries = DecodeDataBlock(bytes);
+  auto entries = DecodeDataBlock(bytes, version_);
   if (!entries.ok())
     return entries.status();
   if (metrics_)
@@ -187,6 +220,22 @@ Result<BlockCache::BlockPtr> SSTableReader::ReadBlock(const BlockMeta& m,
   if (use_cache && block_cache_)
     block_cache_->Insert(key, owned, BlockCharge(*owned));
   return owned;
+}
+
+Result<InternalEntry> SSTableReader::FindInV2Block(const BlockMeta& m,
+                                                   std::string_view key,
+                                                   std::uint64_t sequence) const {
+  if (m.size > std::numeric_limits<std::size_t>::max())
+    return Status::Corruption("SSTable block is too large for this platform");
+  std::vector<std::byte> bytes(m.size);
+  auto status = ReadExactly(*file_, m.offset, bytes);
+  if (!status.ok())
+    return status;
+  if (metrics_) {
+    metrics_->block_reads.fetch_add(1, std::memory_order_relaxed);
+    metrics_->block_decodes.fetch_add(1, std::memory_order_relaxed);
+  }
+  return FindDataBlockEntry(bytes, kSstableVersion, key, sequence);
 }
 Result<SSTableProperties> SSTableReader::ValidateAndGetProperties() const {
   if (blocks_.empty())
@@ -215,10 +264,19 @@ Result<SSTableProperties> SSTableReader::ValidateAndGetProperties() const {
       properties.largest_key = entry.user_key;
       properties.min_sequence = std::min(properties.min_sequence, entry.sequence);
       properties.max_sequence = std::max(properties.max_sequence, entry.sequence);
+      ++properties.entry_count;
     }
     previous_key = entries.value()->back().user_key;
   }
 
+  if (persisted_properties_ &&
+      (properties.entry_count != persisted_properties_->entry_count ||
+       properties.smallest_key != persisted_properties_->smallest_key ||
+       properties.largest_key != persisted_properties_->largest_key ||
+       properties.min_sequence != persisted_properties_->min_sequence ||
+       properties.max_sequence != persisted_properties_->max_sequence)) {
+    return Status::Corruption("SSTable properties do not match data blocks");
+  }
   return properties;
 }
 
@@ -233,7 +291,8 @@ SSTableReader::NewIterator(std::string_view begin, std::string_view end) const {
     return status;
   return std::unique_ptr<InternalIterator>(std::move(iterator));
 }
-Result<InternalEntry> SSTableReader::Get(std::string_view key) const {
+Result<InternalEntry> SSTableReader::Get(std::string_view key,
+                                         std::uint64_t sequence) const {
   if (metrics_)
     metrics_->table_probes.fetch_add(1, std::memory_order_relaxed);
   auto it = std::lower_bound(
@@ -241,6 +300,9 @@ Result<InternalEntry> SSTableReader::Get(std::string_view key) const {
       [](const BlockMeta& b, std::string_view k) { return b.last_key < k; });
   if (it == blocks_.end() || key < it->first_key)
     return Status::NotFound("key is absent");
+
+  if (version_ == kSstableVersion && (!block_cache_ || !block_cache_->enabled()))
+    return FindInV2Block(*it, key, sequence);
 
   auto entries = ReadBlock(*it);
   if (!entries.ok())
@@ -251,7 +313,12 @@ Result<InternalEntry> SSTableReader::Get(std::string_view key) const {
       [](const InternalEntry& a, std::string_view k) { return a.user_key < k; });
   if (e == entries.value()->end() || e->user_key != key)
     return Status::NotFound("key is absent");
-  return *e;
+  while (e != entries.value()->end() && e->user_key == key) {
+    if (e->sequence <= sequence)
+      return *e;
+    ++e;
+  }
+  return Status::NotFound("key has no visible version");
 }
 Result<std::vector<InternalEntry>> SSTableReader::Scan(std::string_view begin,
                                                        std::string_view end) const {

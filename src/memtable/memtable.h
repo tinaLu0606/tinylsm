@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <limits>
 #include <map>
 #include <span>
 #include <string>
@@ -14,16 +15,18 @@
 
 namespace tinylsm::internal {
 
-/// An ordered, non-thread-safe collection containing the newest record per key.
+/// An ordered, non-thread-safe collection containing all unflushed MVCC versions.
 class MemTable {
 public:
-  /// Inserts or replaces an entry. A replacement's sequence must strictly
-  /// increase; tombstones remain stored so they can hide older disk values.
+  /// Inserts one version. Per-key versions are stored in descending sequence
+  /// order; tombstones remain stored so they can hide older disk values.
   Status Apply(InternalEntry entry);
   /// Applies a validated sequence atomically with respect to allocation
-  /// failures: all required map nodes are staged before entries_ is changed.
+  /// failures: final values for touched keys are staged before entries_ changes.
   Status ApplyBatch(std::span<const InternalEntry> entries);
-  [[nodiscard]] Result<InternalEntry> Get(std::string_view key) const;
+  [[nodiscard]] Result<InternalEntry>
+  Get(std::string_view key,
+      std::uint64_t sequence = std::numeric_limits<std::uint64_t>::max()) const;
 
   [[nodiscard]] Result<std::unique_ptr<InternalIterator>>
   NewIterator(std::string_view begin, std::string_view end) const;
@@ -40,7 +43,7 @@ public:
 
 private:
   class Iterator;
-  std::map<std::string, InternalEntry, BytewiseLess> entries_;
+  std::map<std::string, std::vector<InternalEntry>, BytewiseLess> entries_;
   std::size_t bytes_ = 0;
 };
 

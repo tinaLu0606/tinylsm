@@ -1,11 +1,15 @@
 #include <benchmark/benchmark.h>
 
+#include <algorithm>
 #include <atomic>
+#include <barrier>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iomanip>
+#include <limits>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -21,6 +25,9 @@
 #include "tinylsm/write_batch.h"
 #include "tinylsm/write_metrics.h"
 
+#include "sstable/sstable_format.h"
+#include "util/coding.h"
+
 #ifdef TINYLSM_HAVE_LEVELDB
 #include <leveldb/db.h>
 #include <leveldb/options.h>
@@ -32,6 +39,9 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr std::size_t kDefaultMemtableBytes = 4U * 1024U * 1024U;
 constexpr std::size_t kCompactionMemtableBytes = 512U * 1024U;
+constexpr std::size_t kGroupCommitMemtableBytes = 64U * 1024U * 1024U;
+constexpr std::uint64_t kSnapshotSetupBatchOperations = 500'000;
+constexpr std::size_t kSnapshotSetupQueueBytes = 128U * 1024U * 1024U;
 
 class TemporaryDirectory {
 public:
@@ -251,6 +261,22 @@ double Percentile(std::vector<double> samples, double percentile) {
       std::ceil(percentile * static_cast<double>(samples.size() - 1)));
   std::nth_element(samples.begin(), samples.begin() + index, samples.end());
   return samples[index];
+}
+
+std::uint64_t ResidentMemoryKilobytes() {
+#ifdef __linux__
+  std::ifstream status("/proc/self/status");
+  std::string label;
+  std::uint64_t kilobytes = 0;
+  while (status >> label) {
+    if (label == "VmRSS:") {
+      status >> kilobytes;
+      return kilobytes;
+    }
+    status.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+  }
+#endif
+  return 0;
 }
 
 void WriteFlushLatency(benchmark::State& state, bool sync, std::uint64_t count,
@@ -755,6 +781,458 @@ void CompactManyTables(benchmark::State& state, std::uint64_t records,
   }
 }
 
+void SnapshotScan(benchmark::State& state, bool pull_iterator, std::uint64_t records,
+                  std::size_t scans, std::size_t value_bytes) {
+  for (auto _ : state) {
+    (void)_;
+    TemporaryDirectory directory(pull_iterator ? "snapshot-iterator" : "snapshot-scan");
+    tinylsm::Options options;
+    options.sync_on_write = false;
+    options.memtable_bytes = 256U * 1024U * 1024U;
+    options.max_pending_write_bytes = kSnapshotSetupQueueBytes;
+    options.max_group_commit_bytes = kSnapshotSetupQueueBytes;
+    auto opened = tinylsm::DB::Open(directory.path(), options);
+    if (!opened.ok()) {
+      state.SkipWithError("open Snapshot benchmark DB failed");
+      return;
+    }
+    auto db = std::move(opened.value());
+    for (std::uint64_t first = 0; first < records;
+         first += kSnapshotSetupBatchOperations) {
+      tinylsm::WriteBatch batch;
+      const auto count = std::min(kSnapshotSetupBatchOperations, records - first);
+      for (std::uint64_t offset = 0; offset < count; ++offset)
+        batch.Put(Key(first + offset), Value(first + offset, value_bytes));
+      if (!db->Write(batch).ok()) {
+        state.SkipWithError("prepare Snapshot benchmark DB failed");
+        return;
+      }
+    }
+    auto snapshot = db->GetSnapshot();
+    if (!snapshot.ok()) {
+      state.SkipWithError("create Snapshot failed");
+      return;
+    }
+
+    std::uint64_t first_result_nanoseconds = 0;
+    std::uint64_t peak_rss_kb = 0;
+    const auto started = Clock::now();
+    for (std::size_t scan = 0; scan < scans; ++scan) {
+      const auto first_started = Clock::now();
+      if (pull_iterator) {
+        auto iterator = db->NewIterator({}, {}, snapshot.value().get());
+        if (!iterator.ok() || !iterator.value()->status().ok()) {
+          state.SkipWithError("create Snapshot Iterator failed");
+          return;
+        }
+        if (iterator.value()->Valid()) {
+          first_result_nanoseconds += static_cast<std::uint64_t>(
+              std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() -
+                                                                   first_started)
+                  .count());
+        }
+        std::uint64_t count = 0;
+        while (iterator.value()->Valid()) {
+          ++count;
+          if (!iterator.value()->Next().ok()) {
+            state.SkipWithError("advance Snapshot Iterator failed");
+            return;
+          }
+        }
+        if (!iterator.value()->status().ok() || count != records) {
+          state.SkipWithError("Snapshot Iterator result mismatch");
+          return;
+        }
+        peak_rss_kb = std::max(peak_rss_kb, ResidentMemoryKilobytes());
+      } else {
+        auto result = db->Scan({}, {});
+        if (!result.ok() || result.value().size() != records) {
+          state.SkipWithError("materialized Scan result mismatch");
+          return;
+        }
+        peak_rss_kb = std::max(peak_rss_kb, ResidentMemoryKilobytes());
+        first_result_nanoseconds += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(Clock::now() -
+                                                                 first_started)
+                .count());
+      }
+    }
+    const auto stopped = Clock::now();
+    const auto operations = records * scans;
+    SetMeasurements(state, operations, operations * (16 + value_bytes),
+                    std::chrono::duration<double>(stopped - started).count());
+    state.counters["first_result_ns"] =
+        static_cast<double>(first_result_nanoseconds) / static_cast<double>(scans);
+    state.counters["snapshot_sequence"] =
+        static_cast<double>(snapshot.value()->sequence());
+    state.counters["peak_rss_kb"] = static_cast<double>(peak_rss_kb);
+  }
+}
+
+void SnapshotRetention(benchmark::State& state, bool keep_snapshot,
+                       std::size_t overwrite_generations, std::uint64_t records,
+                       std::size_t value_bytes) {
+  for (auto _ : state) {
+    (void)_;
+    TemporaryDirectory directory(keep_snapshot ? "snapshot-retained"
+                                               : "snapshot-released");
+    tinylsm::Options options;
+    options.sync_on_write = false;
+    options.memtable_bytes = 1;
+    options.sstable_block_bytes = 4U * 1024U;
+    options.compaction_table_trigger = 0;
+    auto opened = tinylsm::DB::Open(directory.path(), options);
+    if (!opened.ok()) {
+      state.SkipWithError("open retention benchmark DB failed");
+      return;
+    }
+    auto db = std::move(opened.value());
+    tinylsm::WriteBatch base;
+    for (std::uint64_t i = 0; i < records; ++i)
+      base.Put(Key(i), Value(i, value_bytes));
+    if (!db->Write(base).ok()) {
+      state.SkipWithError("prepare retention base failed");
+      return;
+    }
+    auto snapshot = db->GetSnapshot();
+    if (!snapshot.ok()) {
+      state.SkipWithError("create retention Snapshot failed");
+      return;
+    }
+    for (std::size_t generation = 0; generation < overwrite_generations; ++generation) {
+      tinylsm::WriteBatch overwrite;
+      for (std::uint64_t i = 0; i < records; ++i) {
+        overwrite.Put(Key(i), Value(i + (generation + 1) * records, value_bytes));
+      }
+      if (!db->Write(overwrite).ok() ||
+          !db->Put("~rotate-" + std::to_string(generation), "x").ok()) {
+        state.SkipWithError("prepare retention overwrite failed");
+        return;
+      }
+    }
+    if (!keep_snapshot)
+      snapshot.value().reset();
+
+    const auto started = Clock::now();
+    if (!db->Compact().ok()) {
+      state.SkipWithError("retention compaction failed");
+      return;
+    }
+    const auto stopped = Clock::now();
+    const auto metrics = db->GetSnapshotMetrics();
+    const auto compaction_metrics = db->GetCompactionMetrics();
+    if (keep_snapshot) {
+      auto old = db->Get(Key(0), snapshot.value().get());
+      if (!old.ok() || old.value() != Value(0, value_bytes)) {
+        state.SkipWithError("retained Snapshot result mismatch");
+        return;
+      }
+    }
+    SetMeasurements(state, records * (overwrite_generations + 1),
+                    records * (overwrite_generations + 1) * (16 + value_bytes),
+                    std::chrono::duration<double>(stopped - started).count());
+    state.counters["overwrite_generations"] =
+        static_cast<double>(overwrite_generations);
+    state.counters["active_snapshots"] = static_cast<double>(metrics.active_snapshots);
+    state.counters["retained_versions"] =
+        static_cast<double>(metrics.last_full_compaction_retained_versions);
+    state.counters["retained_bytes"] =
+        static_cast<double>(metrics.last_full_compaction_retained_bytes);
+    state.counters["live_sstable_bytes"] =
+        static_cast<double>(compaction_metrics.live_sstable_bytes);
+  }
+}
+
+void SnapshotWriterOverlap(benchmark::State& state, bool pull_iterator,
+                           std::uint64_t records, std::uint64_t writer_operations,
+                           std::size_t value_bytes) {
+  for (auto _ : state) {
+    (void)_;
+    TemporaryDirectory directory(pull_iterator ? "snapshot-overlap-iterator"
+                                               : "snapshot-overlap-scan");
+    tinylsm::Options options;
+    options.sync_on_write = false;
+    options.memtable_bytes = 256U * 1024U * 1024U;
+    options.max_pending_write_bytes = kSnapshotSetupQueueBytes;
+    options.max_group_commit_bytes = kSnapshotSetupQueueBytes;
+    auto opened = tinylsm::DB::Open(directory.path(), options);
+    if (!opened.ok()) {
+      state.SkipWithError("open overlap benchmark DB failed");
+      return;
+    }
+    auto db = std::move(opened.value());
+    for (std::uint64_t first = 0; first < records;
+         first += kSnapshotSetupBatchOperations) {
+      tinylsm::WriteBatch batch;
+      const auto count = std::min(kSnapshotSetupBatchOperations, records - first);
+      for (std::uint64_t offset = 0; offset < count; ++offset)
+        batch.Put(Key(first + offset), Value(first + offset, value_bytes));
+      if (!db->Write(batch).ok()) {
+        state.SkipWithError("prepare overlap benchmark DB failed");
+        return;
+      }
+    }
+    auto snapshot = db->GetSnapshot();
+    if (!snapshot.ok()) {
+      state.SkipWithError("create overlap Snapshot failed");
+      return;
+    }
+
+    const auto before = db->GetReadMetrics();
+    std::atomic<bool> start = false;
+    std::atomic<bool> reader_ok = true;
+    std::atomic<bool> writer_ok = true;
+    std::vector<double> writer_latencies;
+    writer_latencies.reserve(static_cast<std::size_t>(writer_operations));
+    std::thread reader([&] {
+      start.wait(false);
+      if (pull_iterator) {
+        auto iterator = db->NewIterator({}, {}, snapshot.value().get());
+        if (!iterator.ok()) {
+          reader_ok.store(false, std::memory_order_relaxed);
+          return;
+        }
+        std::uint64_t count = 0;
+        while (iterator.value()->Valid()) {
+          ++count;
+          if (!iterator.value()->Next().ok()) {
+            reader_ok.store(false, std::memory_order_relaxed);
+            return;
+          }
+        }
+        if (!iterator.value()->status().ok() || count != records)
+          reader_ok.store(false, std::memory_order_relaxed);
+        return;
+      }
+
+      auto scan = db->Scan({}, {});
+      if (!scan.ok() || scan.value().size() != records)
+        reader_ok.store(false, std::memory_order_relaxed);
+    });
+    std::thread writer([&] {
+      start.wait(false);
+      for (std::uint64_t i = 0; i < writer_operations; ++i) {
+        const auto write_started = Clock::now();
+        if (!db->Put(Key(records + i), Value(records + i, value_bytes)).ok()) {
+          writer_ok.store(false, std::memory_order_relaxed);
+          return;
+        }
+        writer_latencies.push_back(
+            std::chrono::duration<double, std::micro>(Clock::now() - write_started)
+                .count());
+      }
+    });
+
+    const auto started = Clock::now();
+    start.store(true, std::memory_order_release);
+    start.notify_all();
+    reader.join();
+    writer.join();
+    const auto stopped = Clock::now();
+    if (!reader_ok.load(std::memory_order_relaxed) ||
+        !writer_ok.load(std::memory_order_relaxed) ||
+        writer_latencies.size() != writer_operations) {
+      state.SkipWithError("overlap benchmark result mismatch");
+      return;
+    }
+
+    const auto after = db->GetReadMetrics();
+    SetMeasurements(state, records + writer_operations,
+                    (records + writer_operations) * (16 + value_bytes),
+                    std::chrono::duration<double>(stopped - started).count());
+    state.counters["writer_p50_us"] = Percentile(writer_latencies, 0.50);
+    state.counters["writer_p95_us"] = Percentile(writer_latencies, 0.95);
+    state.counters["writer_p99_us"] = Percentile(writer_latencies, 0.99);
+    state.counters["write_lock_wait_ns"] = static_cast<double>(
+        after.write_lock_wait_nanoseconds - before.write_lock_wait_nanoseconds);
+    state.counters["write_lock_acquisitions"] = static_cast<double>(
+        after.write_lock_acquisitions - before.write_lock_acquisitions);
+  }
+}
+
+enum class SstableKeyShape { kSharedPrefix, kRandom };
+
+std::vector<tinylsm::internal::InternalEntry>
+MakeSstableEntries(SstableKeyShape shape, std::size_t entries,
+                   std::size_t value_bytes) {
+  std::vector<tinylsm::internal::InternalEntry> out;
+  out.reserve(entries);
+  std::uint64_t random = 0x51a7e5eedULL;
+  for (std::size_t index = 0; index < entries; ++index) {
+    std::string key;
+    if (shape == SstableKeyShape::kSharedPrefix) {
+      key = "tenant/000042/collection/records/" + Key(index);
+    } else {
+      std::ostringstream encoded;
+      encoded << 'r' << std::hex << std::setw(16) << std::setfill('0')
+              << NextRandom(random);
+      key = encoded.str();
+    }
+    out.push_back({std::move(key), static_cast<std::uint64_t>(index + 1),
+                   tinylsm::internal::ValueType::kValue, Value(index, value_bytes)});
+  }
+  std::sort(out.begin(), out.end(), [](const auto& left, const auto& right) {
+    return left.user_key < right.user_key;
+  });
+  return out;
+}
+
+void SstableDataBlockEncode(benchmark::State& state, bool v2, SstableKeyShape shape,
+                            std::uint32_t restart_interval, std::size_t entries,
+                            std::size_t value_bytes) {
+  const auto input = MakeSstableEntries(shape, entries, value_bytes);
+  for (auto _ : state) {
+    (void)_;
+    const auto started = Clock::now();
+    auto encoded = v2 ? tinylsm::internal::EncodeDataBlock(input, restart_interval)
+                      : tinylsm::internal::EncodeDataBlockV1(input);
+    const auto stopped = Clock::now();
+    if (!encoded.ok()) {
+      state.SkipWithError(encoded.status().ToString().c_str());
+      return;
+    }
+    SetMeasurements(state, entries, entries * (32 + value_bytes),
+                    std::chrono::duration<double>(stopped - started).count());
+    state.counters["encoded_bytes"] = static_cast<double>(encoded.value().size());
+    state.counters["bytes_per_entry"] =
+        static_cast<double>(encoded.value().size()) / static_cast<double>(entries);
+    state.counters["restart_interval"] =
+        v2 ? static_cast<double>(restart_interval) : 0.0;
+  }
+}
+
+void SstableDataBlockLookup(benchmark::State& state, bool v2, SstableKeyShape shape,
+                            std::uint32_t restart_interval, std::size_t entries,
+                            std::uint64_t lookups, std::size_t value_bytes) {
+  const auto input = MakeSstableEntries(shape, entries, value_bytes);
+  auto encoded = v2 ? tinylsm::internal::EncodeDataBlock(input, restart_interval)
+                    : tinylsm::internal::EncodeDataBlockV1(input);
+  if (!encoded.ok()) {
+    state.SkipWithError(encoded.status().ToString().c_str());
+    return;
+  }
+  const auto version =
+      v2 ? tinylsm::internal::kSstableVersion : tinylsm::internal::kSstableVersionV1;
+
+  for (auto _ : state) {
+    (void)_;
+    std::uint64_t random = 0xdecafbadULL;
+    const auto started = Clock::now();
+    for (std::uint64_t lookup = 0; lookup < lookups; ++lookup) {
+      const auto& expected = input[NextRandom(random) % input.size()];
+      auto found = tinylsm::internal::FindDataBlockEntry(
+          tinylsm::internal::AsBytes(encoded.value()), version, expected.user_key,
+          std::numeric_limits<std::uint64_t>::max());
+      if (!found.ok() || found.value().value != expected.value) {
+        state.SkipWithError("SSTable data-block lookup result mismatch");
+        return;
+      }
+    }
+    const auto stopped = Clock::now();
+    SetMeasurements(state, lookups, lookups * (32 + value_bytes),
+                    std::chrono::duration<double>(stopped - started).count());
+    state.counters["block_bytes"] = static_cast<double>(encoded.value().size());
+    state.counters["bytes_per_entry"] =
+        static_cast<double>(encoded.value().size()) / static_cast<double>(entries);
+    state.counters["restart_interval"] =
+        v2 ? static_cast<double>(restart_interval) : 0.0;
+  }
+}
+
+void GroupCommitMultiWriter(benchmark::State& state, std::size_t writer_count,
+                            std::size_t max_group_requests,
+                            std::uint64_t total_operations, std::size_t value_bytes) {
+  if (total_operations % writer_count != 0) {
+    state.SkipWithError("total group-commit operations must divide across writers");
+    return;
+  }
+  for (auto _ : state) {
+    (void)_;
+    TemporaryDirectory directory("group-commit-" + std::to_string(writer_count) + "-" +
+                                 std::to_string(max_group_requests));
+    tinylsm::Options options;
+    options.sync_on_write = true;
+    options.memtable_bytes = kGroupCommitMemtableBytes;
+    options.max_pending_write_requests = total_operations;
+    options.max_pending_write_bytes = 64U * 1024U * 1024U;
+    options.max_group_commit_requests = max_group_requests;
+    options.max_group_commit_bytes = 1U * 1024U * 1024U;
+    auto opened = tinylsm::DB::Open(directory.path(), options);
+    if (!opened.ok()) {
+      state.SkipWithError(opened.status().ToString().c_str());
+      return;
+    }
+    auto db = std::move(opened.value());
+    const auto operations_per_writer = total_operations / writer_count;
+    std::vector<std::vector<double>> latencies(writer_count);
+    std::atomic<bool> writers_ok = true;
+    std::barrier start(static_cast<std::ptrdiff_t>(writer_count + 1));
+    std::vector<std::thread> writers;
+    writers.reserve(writer_count);
+    for (std::size_t writer = 0; writer < writer_count; ++writer) {
+      writers.emplace_back([&, writer] {
+        auto& samples = latencies[writer];
+        samples.reserve(static_cast<std::size_t>(operations_per_writer));
+        start.arrive_and_wait();
+        for (std::uint64_t index = 0; index < operations_per_writer; ++index) {
+          const auto operation_started = Clock::now();
+          const auto key =
+              "writer-" + std::to_string(writer) + "-" + std::to_string(index);
+          if (!db->Put(key, Value(index, value_bytes)).ok()) {
+            writers_ok.store(false, std::memory_order_relaxed);
+            return;
+          }
+          samples.push_back(std::chrono::duration<double, std::micro>(Clock::now() -
+                                                                      operation_started)
+                                .count());
+        }
+      });
+    }
+
+    const auto started = Clock::now();
+    start.arrive_and_wait();
+    for (auto& writer : writers)
+      writer.join();
+    const auto stopped = Clock::now();
+    if (!writers_ok.load(std::memory_order_relaxed)) {
+      state.SkipWithError("group-commit writer failed");
+      return;
+    }
+    std::vector<double> combined_latencies;
+    combined_latencies.reserve(static_cast<std::size_t>(total_operations));
+    for (const auto& samples : latencies)
+      combined_latencies.insert(combined_latencies.end(), samples.begin(),
+                                samples.end());
+    if (combined_latencies.size() != total_operations) {
+      state.SkipWithError("group-commit sample count mismatch");
+      return;
+    }
+    const auto metrics = db->GetWriteMetrics();
+    if (!db->Close().ok()) {
+      state.SkipWithError("close group-commit benchmark DB failed");
+      return;
+    }
+
+    SetMeasurements(state, total_operations, total_operations * (16 + value_bytes),
+                    std::chrono::duration<double>(stopped - started).count());
+    state.counters["writer_count"] = static_cast<double>(writer_count);
+    state.counters["max_group_requests"] = static_cast<double>(max_group_requests);
+    state.counters["physical_groups"] = static_cast<double>(metrics.group_commits);
+    state.counters["grouped_requests"] =
+        static_cast<double>(metrics.grouped_write_requests);
+    state.counters["wal_syncs"] = static_cast<double>(metrics.wal_syncs);
+    state.counters["wal_syncs_per_write"] =
+        static_cast<double>(metrics.wal_syncs) / static_cast<double>(total_operations);
+    state.counters["writer_queue_wait_us"] =
+        static_cast<double>(metrics.writer_queue_wait_nanoseconds) / 1'000.0;
+    state.counters["max_writer_queue_depth"] =
+        static_cast<double>(metrics.max_writer_queue_depth);
+    state.counters["put_p50_us"] = Percentile(combined_latencies, 0.50);
+    state.counters["put_p95_us"] = Percentile(combined_latencies, 0.95);
+    state.counters["put_p99_us"] = Percentile(combined_latencies, 0.99);
+  }
+}
+
 void CompactionMixed(benchmark::State& state, bool background, std::uint64_t operations,
                      std::size_t key_space, std::size_t value_bytes) {
   for (auto _ : state) {
@@ -1038,6 +1516,86 @@ const bool registered = [] {
       ->Iterations(1)
       ->Repetitions(5)
       ->UseManualTime();
+  for (const std::uint64_t records : {10'000ULL, 100'000ULL, 1'000'000ULL}) {
+    const auto label = std::to_string(records / 1'000) + "K";
+    benchmark::RegisterBenchmark(("TinyLSM/SnapshotMaterializedScan" + label).c_str(),
+                                 SnapshotScan, false, records, 10, 100)
+        ->Iterations(1)
+        ->Repetitions(5)
+        ->UseManualTime();
+    benchmark::RegisterBenchmark(("TinyLSM/SnapshotIterator" + label).c_str(),
+                                 SnapshotScan, true, records, 10, 100)
+        ->Iterations(1)
+        ->Repetitions(5)
+        ->UseManualTime();
+  }
+  for (const std::size_t generations : {0U, 1U, 6U}) {
+    const auto label = std::to_string(generations == 0 ? 0 : generations * 10) + "s";
+    benchmark::RegisterBenchmark(("TinyLSM/SnapshotRetentionHeld" + label).c_str(),
+                                 SnapshotRetention, true, generations, 2'000, 100)
+        ->Iterations(1)
+        ->Repetitions(5)
+        ->UseManualTime();
+  }
+  benchmark::RegisterBenchmark("TinyLSM/SnapshotRetentionReleased60s",
+                               SnapshotRetention, false, 6, 2'000, 100)
+      ->Iterations(1)
+      ->Repetitions(5)
+      ->UseManualTime();
+  benchmark::RegisterBenchmark("TinyLSM/SnapshotWriterOverlapMaterializedScan",
+                               SnapshotWriterOverlap, false, 100'000, 5'000, 100)
+      ->Iterations(1)
+      ->Repetitions(5)
+      ->UseManualTime();
+  benchmark::RegisterBenchmark("TinyLSM/SnapshotWriterOverlapIterator",
+                               SnapshotWriterOverlap, true, 100'000, 5'000, 100)
+      ->Iterations(1)
+      ->Repetitions(5)
+      ->UseManualTime();
+  for (const auto [shape, raw_label] :
+       {std::pair{SstableKeyShape::kSharedPrefix, "Prefix"},
+        std::pair{SstableKeyShape::kRandom, "Random"}}) {
+    const std::string label(raw_label);
+    benchmark::RegisterBenchmark(("TinyLSM/SstableDataBlockEncodeV1" + label).c_str(),
+                                 SstableDataBlockEncode, false, shape, 0, 16'384, 100)
+        ->Iterations(1)
+        ->Repetitions(5)
+        ->UseManualTime();
+    benchmark::RegisterBenchmark(("TinyLSM/SstableDataBlockLookupV1" + label).c_str(),
+                                 SstableDataBlockLookup, false, shape, 0, 128, 2'000,
+                                 100)
+        ->Iterations(1)
+        ->Repetitions(5)
+        ->UseManualTime();
+    for (const std::uint32_t restart_interval : {4U, 16U, 64U}) {
+      const auto suffix = "V2" + label + "Restart" + std::to_string(restart_interval);
+      benchmark::RegisterBenchmark(("TinyLSM/SstableDataBlockEncode" + suffix).c_str(),
+                                   SstableDataBlockEncode, true, shape,
+                                   restart_interval, 16'384, 100)
+          ->Iterations(1)
+          ->Repetitions(5)
+          ->UseManualTime();
+      benchmark::RegisterBenchmark(("TinyLSM/SstableDataBlockLookup" + suffix).c_str(),
+                                   SstableDataBlockLookup, true, shape,
+                                   restart_interval, 128, 2'000, 100)
+          ->Iterations(1)
+          ->Repetitions(5)
+          ->UseManualTime();
+    }
+  }
+  for (const std::size_t writers : {1U, 2U, 4U, 8U, 16U}) {
+    const auto writer_label = std::to_string(writers) + "Writers";
+    benchmark::RegisterBenchmark(("TinyLSM/GroupCommitOff" + writer_label).c_str(),
+                                 GroupCommitMultiWriter, writers, 1, 8'192, 256)
+        ->Iterations(1)
+        ->Repetitions(5)
+        ->UseManualTime();
+    benchmark::RegisterBenchmark(("TinyLSM/GroupCommitOn" + writer_label).c_str(),
+                                 GroupCommitMultiWriter, writers, 8, 8'192, 256)
+        ->Iterations(1)
+        ->Repetitions(5)
+        ->UseManualTime();
+  }
   benchmark::RegisterBenchmark("TinyLSM/CompactionMixedManual", CompactionMixed, false,
                                20'000, 4'096, 256)
       ->Iterations(1)

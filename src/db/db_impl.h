@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -10,6 +11,7 @@
 #include <thread>
 #include <vector>
 
+#include "db/snapshot_registry.h"
 #include "io/file.h"
 #include "manifest/manifest_state.h"
 #include "memtable/memtable.h"
@@ -34,6 +36,11 @@ public:
   std::atomic<std::uint64_t> background_flush_failures{0};
   std::atomic<std::uint64_t> backpressure_waits{0};
   std::atomic<std::uint64_t> backpressure_wait_nanoseconds{0};
+  std::atomic<std::uint64_t> group_commits{0};
+  std::atomic<std::uint64_t> grouped_write_requests{0};
+  std::atomic<std::uint64_t> writer_queue_wait_nanoseconds{0};
+  std::atomic<std::size_t> writer_queue_depth{0};
+  std::atomic<std::size_t> max_writer_queue_depth{0};
   std::atomic<std::size_t> background_queue_depth{0};
   std::atomic<std::size_t> max_background_queue_depth{0};
   std::atomic<std::size_t> immutable_memtable_bytes{0};
@@ -73,10 +80,16 @@ public:
   Status Delete(std::string_view key);
   Status Write(const WriteBatch& batch);
   Result<std::string> Get(std::string_view key) const;
+  Result<std::string> Get(std::string_view key, const Snapshot* snapshot) const;
   Result<std::vector<Entry>> Scan(std::string_view begin, std::string_view end) const;
+  Result<std::shared_ptr<const Snapshot>> GetSnapshot() const;
+  Result<std::unique_ptr<Iterator>> NewIterator(std::string_view begin,
+                                                std::string_view end,
+                                                const Snapshot* snapshot) const;
   [[nodiscard]] ReadMetrics GetReadMetrics() const noexcept;
   [[nodiscard]] WriteMetrics GetWriteMetrics() const noexcept;
   [[nodiscard]] CompactionMetrics GetCompactionMetrics() const noexcept;
+  [[nodiscard]] SnapshotMetrics GetSnapshotMetrics() const noexcept;
   Status Compact();
   Status Close();
   ~Impl();
@@ -97,11 +110,13 @@ private:
                     internal::MemTable& target, std::uint64_t* recovered_max);
   void CleanupObsoleteFiles() noexcept;
 
-  /// Performs the WAL-first write path and rotates a full active MemTable.
-  /// A background flush error becomes sticky after the record was accepted.
-  Status WriteEntry(std::string_view key, std::string_view value,
-                    internal::ValueType type,
-                    std::unique_lock<std::shared_mutex>& lock);
+  struct WriterRequest;
+  Status SubmitWrite(WriteBatch batch);
+  Status ValidateWriteBatch(const WriteBatch& batch, std::size_t& queue_bytes) const;
+  void DrainWriterQueue();
+  Status ApplyWriteGroup(const std::vector<std::shared_ptr<WriterRequest>>& group);
+  void StopWriterQueue() noexcept;
+  void ResumeWriterQueue() noexcept;
   Status PrepareForWrite(std::unique_lock<std::shared_mutex>& lock);
   Status RotateMemTable();
   Status FlushImmutableMemTable();
@@ -133,6 +148,7 @@ private:
   std::shared_ptr<internal::WriteMetricsState> write_metrics_;
   std::shared_ptr<internal::CompactionMetricsState> compaction_metrics_;
   std::shared_ptr<internal::BlockCache> block_cache_;
+  std::shared_ptr<internal::SnapshotState> snapshot_state_;
   /// Set when the authoritative on-disk Manifest is uncertain. Close remains
   /// available, but every data operation fails until the caller reopens the DB.
   std::optional<Status> terminal_error_;
@@ -149,6 +165,12 @@ private:
   std::thread background_worker_;
   std::condition_variable_any background_cv_;
   mutable std::shared_mutex mutex_;
+  std::mutex writer_mutex_;
+  std::condition_variable writer_cv_;
+  std::deque<std::shared_ptr<WriterRequest>> writer_queue_;
+  std::size_t writer_queue_bytes_ = 0;
+  bool writer_leader_ = false;
+  bool writer_stopping_ = false;
 };
 
 } // namespace tinylsm
