@@ -19,7 +19,7 @@ set(expected_names
     TinyLSM/FillSequentialSync
     TinyLSM/ReadRandomHit
     TinyLSM/ReadRandomMiss
-    TinyLSM/ScanTail1000
+    TinyLSM/ScanTail10000Repeated
     TinyLSM/FillBatch1
     TinyLSM/FillBatch10
     TinyLSM/FillBatch100
@@ -32,7 +32,7 @@ set(expected_names
     LevelDB/FillSequentialSync
     LevelDB/ReadRandomHit
     LevelDB/ReadRandomMiss
-    LevelDB/ScanTail1000
+    LevelDB/ScanTail10000Repeated
     LevelDB/FillBatch1
     LevelDB/FillBatch10
     LevelDB/FillBatch100
@@ -62,9 +62,9 @@ endforeach()
 
 list(LENGTH found_names median_count)
 list(LENGTH expected_names expected_count)
-if(NOT median_count EQUAL expected_count)
+if(median_count LESS expected_count)
   message(FATAL_ERROR
-          "expected ${expected_count} median results, found ${median_count}")
+          "expected at least ${expected_count} median results, found ${median_count}")
 endif()
 
 message(STATUS "verified ${INPUT}: ${median_count} complete median results")

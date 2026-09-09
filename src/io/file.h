@@ -80,7 +80,8 @@ public:
   /// Creates `path` if missing and takes an exclusive, non-blocking advisory
   /// lock on it. Returns an IOError when another handle already holds the
   /// lock, including a second handle in this same process.
-  virtual Result<std::unique_ptr<FileLock>> LockFile(const std::filesystem::path& path) = 0;
+  virtual Result<std::unique_ptr<FileLock>>
+  LockFile(const std::filesystem::path& path) = 0;
 };
 
 std::unique_ptr<FileSystem> NewPosixFileSystem();

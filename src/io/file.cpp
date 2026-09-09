@@ -58,7 +58,7 @@ public:
     }
   }
   Result<std::uint64_t> Size() const override {
-    struct stat st{};
+    struct stat st = {};
     if (::fstat(fd_, &st) != 0)
       return Error("fstat", path_, errno);
     return static_cast<std::uint64_t>(st.st_size);
