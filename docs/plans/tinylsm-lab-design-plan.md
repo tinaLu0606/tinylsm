@@ -219,7 +219,7 @@ Goal 1 范围内。
 **Goal prompt**：
 
 ```text
-/goal Implement Goal 1 from docs/plans/tinylsm-lab-design.md. Complete the entire
+/goal Implement Goal 1 from docs/plans/tinylsm-lab-design-plan.md. Complete the entire
 frontend and deterministic MockLabApi without stopping until the frontend tests,
 production build, and desktop/mobile browser inspection pass. Preserve unrelated
 changes, do not implement the C++ backend, and do not commit or push.
@@ -264,7 +264,7 @@ Open → Put → Get → Scan → Close → Reopen → Scan 流程，console 无
 **Goal prompt**：
 
 ```text
-/goal Implement Goal 2 from docs/plans/tinylsm-lab-design.md. Build the C++ Lab
+/goal Implement Goal 2 from docs/plans/tinylsm-lab-design-plan.md. Build the C++ Lab
 Server, diagnostic snapshot, serialized live session API, SSE events, and HttpLabApi
 integration. Continue until C++ tests, frontend tests/build, and the live browser
 operation flow pass. Preserve unrelated changes and do not commit or push.
@@ -298,7 +298,7 @@ npm run build
 **Goal prompt**：
 
 ```text
-/goal Implement Goal 3 from docs/plans/tinylsm-lab-design.md. Complete the paged
+/goal Implement Goal 3 from docs/plans/tinylsm-lab-design-plan.md. Complete the paged
 storage inspector, bounded logging and metrics, deterministic workload runner,
 reference-model validation, and real frontend views. Continue until all C++ and
 frontend tests, sanitizers, build, and reproducibility checks pass. Do not commit
@@ -335,7 +335,7 @@ npm run build
 **Goal prompt**：
 
 ```text
-/goal Implement Goal 4 from docs/plans/tinylsm-lab-design.md. Build the sandboxed
+/goal Implement Goal 4 from docs/plans/tinylsm-lab-design-plan.md. Build the sandboxed
 Recovery Lab worker and three recovery scenarios, then finish single-command local
 startup, static UI serving, end-to-end tests, README, and security validation.
 Continue until every listed acceptance check passes. Preserve unrelated changes

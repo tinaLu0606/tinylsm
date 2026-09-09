@@ -1,0 +1,258 @@
++ cmake --preset dev-tsan
+Preset CMake variables:
+
+  BUILD_TESTING:BOOL="TRUE"
+  CMAKE_BUILD_TYPE="Debug"
+  CMAKE_EXPORT_COMPILE_COMMANDS:BOOL="TRUE"
+  TINYLSM_BUILD_TOOLS:BOOL="TRUE"
+  TINYLSM_ENABLE_TSAN:BOOL="TRUE"
+  TINYLSM_FETCH_TEST_DEPS:BOOL="TRUE"
+
+-- Using the multi-header code from /home/tina.guest/tinylsm-goal4-20260908/build/dev-tsan/_deps/nlohmann_json-src/include/
+-- 
+-- 29.3.0
+-- Configuring done (0.3s)
+-- Generating done (0.1s)
+-- Build files have been written to: /home/tina.guest/tinylsm-goal4-20260908/build/dev-tsan
++ cmake --build --preset dev-tsan
+ninja: no work to do.
++ ctest --preset dev-tsan --output-on-failure
+Test project /home/tina.guest/tinylsm-goal4-20260908/build/dev-tsan
+        Start   1: StatusTest.PreservesCodeWhileAddingDiagnosticContext
+  1/117 Test   #1: StatusTest.PreservesCodeWhileAddingDiagnosticContext .................................   Passed    0.01 sec
+        Start   2: ResultTest.EnforcesValueOrErrorInvariantInAllBuildModes
+  2/117 Test   #2: ResultTest.EnforcesValueOrErrorInvariantInAllBuildModes ..............................   Passed    0.01 sec
+        Start   3: MemTableTest.PreservesEmptyValueTombstoneAndSequenceRules
+  3/117 Test   #3: MemTableTest.PreservesEmptyValueTombstoneAndSequenceRules ............................   Passed    0.01 sec
+        Start   4: WalCodecTest.HasStableHeaderAndRejectsCorruptionAndLimits
+  4/117 Test   #4: WalCodecTest.HasStableHeaderAndRejectsCorruptionAndLimits ............................   Passed    0.01 sec
+        Start   5: WalBatchCodecTest.RoundTripsAndRejectsDamageLimitsAndSequenceGaps
+  5/117 Test   #5: WalBatchCodecTest.RoundTripsAndRejectsDamageLimitsAndSequenceGaps ....................   Passed    0.01 sec
+        Start   6: WalReaderTest.ReplaysMixedSingleAndBatchRecordsAtomically
+  6/117 Test   #6: WalReaderTest.ReplaysMixedSingleAndBatchRecordsAtomically ............................   Passed    0.01 sec
+        Start   7: WalReaderTest.DiscardsEveryIncompleteBatchPrefixWithoutCallingApply
+  7/117 Test   #7: WalReaderTest.DiscardsEveryIncompleteBatchPrefixWithoutCallingApply ..................   Passed    0.01 sec
+        Start   8: WalReaderTest.ReplaysValidPrefixAndClassifiesTruncatedTail
+  8/117 Test   #8: WalReaderTest.ReplaysValidPrefixAndClassifiesTruncatedTail ...........................   Passed    0.01 sec
+        Start   9: WalReaderTest.EnforcesPublishedFloorAndStrictlyIncreasingSequence
+  9/117 Test   #9: WalReaderTest.EnforcesPublishedFloorAndStrictlyIncreasingSequence ....................   Passed    0.01 sec
+        Start  10: SstableFormatTest.ChecksOrderingAndIndependentChecksums
+ 10/117 Test  #10: SstableFormatTest.ChecksOrderingAndIndependentChecksums ..............................   Passed    0.01 sec
+        Start  11: ManifestCodecTest.ReadsFixedVersionOneGoldenFiles
+ 11/117 Test  #11: ManifestCodecTest.ReadsFixedVersionOneGoldenFiles ....................................   Passed    0.02 sec
+        Start  12: ManifestCodecTest.WritesVersionThreeAndPreservesMultipleTableOrder
+ 12/117 Test  #12: ManifestCodecTest.WritesVersionThreeAndPreservesMultipleTableOrder ...................   Passed    0.02 sec
+        Start  13: ManifestCodecTest.RejectsFramingChecksumAndUnknownFieldDamage
+ 13/117 Test  #13: ManifestCodecTest.RejectsFramingChecksumAndUnknownFieldDamage ........................   Passed    0.02 sec
+        Start  14: ManifestCodecTest.EnforcesSnapshotInvariantsAndFileSizeLimit
+ 14/117 Test  #14: ManifestCodecTest.EnforcesSnapshotInvariantsAndFileSizeLimit .........................   Passed    0.24 sec
+        Start  15: FilenameTest.FormatsAndParsesCanonicalNumberedFiles
+ 15/117 Test  #15: FilenameTest.FormatsAndParsesCanonicalNumberedFiles ..................................   Passed    0.01 sec
+        Start  16: FilenameTest.RejectsZeroOverflowAndNonCanonicalNames
+ 16/117 Test  #16: FilenameTest.RejectsZeroOverflowAndNonCanonicalNames .................................   Passed    0.01 sec
+        Start  17: MemTableIteratorTest.BorrowsEntriesAndHonorsBytewiseHalfOpenRange
+ 17/117 Test  #17: MemTableIteratorTest.BorrowsEntriesAndHonorsBytewiseHalfOpenRange ....................   Passed    0.01 sec
+        Start  18: MergingIteratorTest.OrdersEveryVersionByUserKeyThenSequenceDescending
+ 18/117 Test  #18: MergingIteratorTest.OrdersEveryVersionByUserKeyThenSequenceDescending ................   Passed    0.01 sec
+        Start  19: MergingIteratorTest.FiltersVersionsForTheRequestedSnapshotSequence
+ 19/117 Test  #19: MergingIteratorTest.FiltersVersionsForTheRequestedSnapshotSequence ...................   Passed    0.01 sec
+        Start  20: MergingIteratorTest.RejectsDuplicateSequenceAndMakesErrorsSticky
+ 20/117 Test  #20: MergingIteratorTest.RejectsDuplicateSequenceAndMakesErrorsSticky .....................   Passed    0.01 sec
+        Start  21: SstableIteratorTest.LoadsBlocksLazilyAndMakesReadFailureSticky
+ 21/117 Test  #21: SstableIteratorTest.LoadsBlocksLazilyAndMakesReadFailureSticky .......................   Passed    0.02 sec
+        Start  22: DBIteratorTest.LateSstableReadFailureReturnsNoPartialScanResult
+ 22/117 Test  #22: DBIteratorTest.LateSstableReadFailureReturnsNoPartialScanResult ......................   Passed    0.02 sec
+        Start  23: SstableTest.BuildsMultipleBlocksAndReadsBoundaryKeys
+ 23/117 Test  #23: SstableTest.BuildsMultipleBlocksAndReadsBoundaryKeys .................................   Passed    0.01 sec
+        Start  24: SstableTest.PreservesMultipleVersionsOfOneUserKey
+ 24/117 Test  #24: SstableTest.PreservesMultipleVersionsOfOneUserKey ....................................   Passed    0.01 sec
+        Start  25: SstableTest.PropertiesRejectIndexMismatchEmptyTableAndZeroSequence
+ 25/117 Test  #25: SstableTest.PropertiesRejectIndexMismatchEmptyTableAndZeroSequence ...................   Passed    0.01 sec
+        Start  26: DBSnapshotTest.PreservesVersionAcrossFlushCompactionAndHandleClose
+ 26/117 Test  #26: DBSnapshotTest.PreservesVersionAcrossFlushCompactionAndHandleClose ...................   Passed    0.02 sec
+        Start  27: DBSnapshotTest.IteratorSeekCannotEscapeItsCreationRange
+ 27/117 Test  #27: DBSnapshotTest.IteratorSeekCannotEscapeItsCreationRange ..............................   Passed    0.01 sec
+        Start  28: DBSnapshotTest.RejectsSnapshotFromAnotherDatabase
+ 28/117 Test  #28: DBSnapshotTest.RejectsSnapshotFromAnotherDatabase ....................................   Passed    0.01 sec
+        Start  29: DBSnapshotTest.DoesNotSurviveCloseAndReopen
+ 29/117 Test  #29: DBSnapshotTest.DoesNotSurviveCloseAndReopen ..........................................   Passed    0.02 sec
+        Start  30: DBSnapshotTest.ReclaimsVersionsAfterTheOldestSnapshotIsReleased
+ 30/117 Test  #30: DBSnapshotTest.ReclaimsVersionsAfterTheOldestSnapshotIsReleased ......................   Passed    0.02 sec
+        Start  31: DBSnapshotTest.FailedCompactionDoesNotChangeAnActiveSnapshot
+ 31/117 Test  #31: DBSnapshotTest.FailedCompactionDoesNotChangeAnActiveSnapshot .........................   Passed    0.03 sec
+        Start  32: DBSnapshotTest.RemainsStableWhileWritersFlushAndCompact
+ 32/117 Test  #32: DBSnapshotTest.RemainsStableWhileWritersFlushAndCompact ..............................   Passed    0.23 sec
+        Start  33: DBSnapshotTest.FixedSeedReferenceModelCoversBatchesSnapshotsAndCompaction
+ 33/117 Test  #33: DBSnapshotTest.FixedSeedReferenceModelCoversBatchesSnapshotsAndCompaction ............   Passed    0.40 sec
+        Start  34: BlockCacheTest.ReusesOnlySuccessfulValidatedBlocksAndCanBeDisabled
+ 34/117 Test  #34: BlockCacheTest.ReusesOnlySuccessfulValidatedBlocksAndCanBeDisabled ...................   Passed    0.01 sec
+        Start  35: BlockCacheTest.EvictsLeastRecentlyUsedBlocksWithinChargeLimit
+ 35/117 Test  #35: BlockCacheTest.EvictsLeastRecentlyUsedBlocksWithinChargeLimit ........................   Passed    0.01 sec
+        Start  36: BlockCacheTest.CompactionDropsOldTableEntriesBeforeReadersChange
+ 36/117 Test  #36: BlockCacheTest.CompactionDropsOldTableEntriesBeforeReadersChange .....................   Passed    0.02 sec
+        Start  37: DBConcurrencyTest.IndependentSstableGetsReachTheReadGateTogether
+ 37/117 Test  #37: DBConcurrencyTest.IndependentSstableGetsReachTheReadGateTogether .....................   Passed    0.02 sec
+        Start  38: BackgroundCompactionConcurrencyTest.ReaderCanOverlapTheCompactionInputSnapshot
+ 38/117 Test  #38: BackgroundCompactionConcurrencyTest.ReaderCanOverlapTheCompactionInputSnapshot .......   Passed    0.03 sec
+        Start  39: FileSystemTest.WritableFileRetriesShortWritesAndPropagatesPathErrors
+ 39/117 Test  #39: FileSystemTest.WritableFileRetriesShortWritesAndPropagatesPathErrors .................   Passed    0.01 sec
+        Start  40: DBErrorTest.FileExistsFailureIsPropagatedWithOpenContext
+ 40/117 Test  #40: DBErrorTest.FileExistsFailureIsPropagatedWithOpenContext .............................   Passed    0.01 sec
+        Start  41: DBErrorTest.SyncFailureLeavesDatabaseOpenAndCloseCanBeRetried
+ 41/117 Test  #41: DBErrorTest.SyncFailureLeavesDatabaseOpenAndCloseCanBeRetried ........................   Passed    0.01 sec
+        Start  42: DBErrorTest.CloseFailureStillTransitionsDatabaseToClosed
+ 42/117 Test  #42: DBErrorTest.CloseFailureStillTransitionsDatabaseToClosed .............................   Passed    0.01 sec
+        Start  43: DBErrorTest.StandardExceptionsPropagateThroughThePublicApi
+ 43/117 Test  #43: DBErrorTest.StandardExceptionsPropagateThroughThePublicApi ...........................   Passed    0.01 sec
+        Start  44: DBErrorTest.AppendFailureChangesNeitherWalNorMemtable
+ 44/117 Test  #44: DBErrorTest.AppendFailureChangesNeitherWalNorMemtable ................................   Passed    0.01 sec
+        Start  45: DBErrorTest.SyncFailureLeavesWriteUnconfirmedButRecoverable
+ 45/117 Test  #45: DBErrorTest.SyncFailureLeavesWriteUnconfirmedButRecoverable ..........................   Passed    0.02 sec
+        Start  46: DBErrorTest.DisabledSyncOnWriteSkipsPerWriteAndCloseSync
+ 46/117 Test  #46: DBErrorTest.DisabledSyncOnWriteSkipsPerWriteAndCloseSync .............................   Passed    0.01 sec
+        Start  47: DBErrorTest.ExhaustedRecoveredSequenceUsesResourceStatus
+ 47/117 Test  #47: DBErrorTest.ExhaustedRecoveredSequenceUsesResourceStatus .............................   Passed    0.02 sec
+        Start  48: DBErrorTest.RejectsActiveWalSequenceThatDoesNotFollowManifest
+ 48/117 Test  #48: DBErrorTest.RejectsActiveWalSequenceThatDoesNotFollowManifest ........................   Passed    0.02 sec
+        Start  49: DBErrorTest.WriteBatchSyncFailureIsUnconfirmedButFullyRecoverable
+ 49/117 Test  #49: DBErrorTest.WriteBatchSyncFailureIsUnconfirmedButFullyRecoverable ....................   Passed    0.02 sec
+        Start  50: DBErrorTest.WriteBatchAppendFailureNeverPartiallyApplies
+ 50/117 Test  #50: DBErrorTest.WriteBatchAppendFailureNeverPartiallyApplies .............................   Passed    0.02 sec
+        Start  51: DBTest.AcceptsActiveWalSequenceGapsAndContinuesAfterTheMaximum
+ 51/117 Test  #51: DBTest.AcceptsActiveWalSequenceGapsAndContinuesAfterTheMaximum .......................   Passed    0.02 sec
+        Start  52: DBTest.DistinguishesMissingEmptyAndTombstone
+ 52/117 Test  #52: DBTest.DistinguishesMissingEmptyAndTombstone .........................................   Passed    0.01 sec
+        Start  53: DBTest.DeleteOfMissingKeyIsIdempotent
+ 53/117 Test  #53: DBTest.DeleteOfMissingKeyIsIdempotent ................................................   Passed    0.01 sec
+        Start  54: DBTest.EnforcesKeyAndValueLimitsBeforeWalAndMemtableMutation
+ 54/117 Test  #54: DBTest.EnforcesKeyAndValueLimitsBeforeWalAndMemtableMutation .........................   Passed    0.01 sec
+        Start  55: DBTest.WriteBatchPreservesOrderAndRecoversAsOneRecord
+ 55/117 Test  #55: DBTest.WriteBatchPreservesOrderAndRecoversAsOneRecord ................................   Passed    0.02 sec
+        Start  56: DBTest.WriteBatchFlushesOnlyAfterTheWholeBatchIsApplied
+ 56/117 Test  #56: DBTest.WriteBatchFlushesOnlyAfterTheWholeBatchIsApplied ..............................   Passed    0.02 sec
+        Start  57: DBTest.ConcurrentCallersAreSerializedWithoutLosingWrites
+ 57/117 Test  #57: DBTest.ConcurrentCallersAreSerializedWithoutLosingWrites .............................   Passed    0.10 sec
+        Start  58: DBTest.IncompleteWalBatchIsDiscardedInFull
+ 58/117 Test  #58: DBTest.IncompleteWalBatchIsDiscardedInFull ...........................................   Passed    0.02 sec
+        Start  59: DBTest.InvalidWriteBatchChangesNeitherWalNorMemtable
+ 59/117 Test  #59: DBTest.InvalidWriteBatchChangesNeitherWalNorMemtable .................................   Passed    0.01 sec
+        Start  60: DBTest.PreservesBinaryKeysValuesAndBytewiseScanOrderAcrossReopen
+ 60/117 Test  #60: DBTest.PreservesBinaryKeysValuesAndBytewiseScanOrderAcrossReopen .....................   Passed    0.02 sec
+        Start  61: DBTest.WalRecoveryReopensLatestValues
+ 61/117 Test  #61: DBTest.WalRecoveryReopensLatestValues ................................................   Passed    0.02 sec
+        Start  62: DBTest.ReopenTruncatesIncompleteWalTail
+ 62/117 Test  #62: DBTest.ReopenTruncatesIncompleteWalTail ..............................................   Passed    0.02 sec
+        Start  63: DBTest.RepeatedFlushPreservesNewestValuesAcrossReopen
+ 63/117 Test  #63: DBTest.RepeatedFlushPreservesNewestValuesAcrossReopen ................................   Passed    0.03 sec
+        Start  64: DBTest.OpensAndReadsMultipleManifestTablesInOldestToNewestOrder
+ 64/117 Test  #64: DBTest.OpensAndReadsMultipleManifestTablesInOldestToNewestOrder ......................   Passed    0.02 sec
+        Start  65: DBTest.RejectsManifestMetadataThatDoesNotMatchTheSstable
+ 65/117 Test  #65: DBTest.RejectsManifestMetadataThatDoesNotMatchTheSstable .............................   Passed    0.02 sec
+        Start  66: DBTest.MissingManifestReferencedTableIsCorruption
+ 66/117 Test  #66: DBTest.MissingManifestReferencedTableIsCorruption ....................................   Passed    0.03 sec
+        Start  67: DBTest.MissingManifestReferencedWalIsCorruption
+ 67/117 Test  #67: DBTest.MissingManifestReferencedWalIsCorruption ......................................   Passed    0.02 sec
+        Start  68: DBTest.CorruptManifestFramingIsReportedThroughOpen
+ 68/117 Test  #68: DBTest.CorruptManifestFramingIsReportedThroughOpen ...................................   Passed    0.01 sec
+        Start  69: DBTest.CorruptReferencedIndexAndFooterAreReportedThroughOpen
+ 69/117 Test  #69: DBTest.CorruptReferencedIndexAndFooterAreReportedThroughOpen .........................   Passed    0.02 sec
+        Start  70: DBTest.ManifestIsAuthoritativeAndIgnoresOrphans
+ 70/117 Test  #70: DBTest.ManifestIsAuthoritativeAndIgnoresOrphans ......................................   Passed    0.02 sec
+        Start  71: DBTest.CorruptReferencedDataBlockIsReportedOnOpen
+ 71/117 Test  #71: DBTest.CorruptReferencedDataBlockIsReportedOnOpen ....................................   Passed    0.02 sec
+        Start  72: DBTest.SstableReadFailureDuringOpenIsPropagated
+ 72/117 Test  #72: DBTest.SstableReadFailureDuringOpenIsPropagated ......................................   Passed    0.04 sec
+        Start  73: CleanupRecoveryTest.OpenRemovesOnlyCanonicalUnreferencedFiles
+ 73/117 Test  #73: CleanupRecoveryTest.OpenRemovesOnlyCanonicalUnreferencedFiles ........................   Passed    0.02 sec
+        Start  74: CleanupRecoveryTest.ListDirFailureDoesNotBlockRecoveredData
+ 74/117 Test  #74: CleanupRecoveryTest.ListDirFailureDoesNotBlockRecoveredData ..........................   Passed    0.02 sec
+        Start  75: CleanupRecoveryTest.RemoveFailureIsRetriedOnTheNextOpen
+ 75/117 Test  #75: CleanupRecoveryTest.RemoveFailureIsRetriedOnTheNextOpen ..............................   Passed    0.02 sec
+        Start  76: CleanupRecoveryTest.SyncDirFailureDoesNotBlockRecoveredData
+ 76/117 Test  #76: CleanupRecoveryTest.SyncDirFailureDoesNotBlockRecoveredData ..........................   Passed    0.02 sec
+        Start  77: CleanupRecoveryTest.FlushRetriesPendingWalRemoval
+ 77/117 Test  #77: CleanupRecoveryTest.FlushRetriesPendingWalRemoval ....................................   Passed    0.02 sec
+        Start  78: CleanupRecoveryTest.CompactionRetriesPendingTableRemoval
+ 78/117 Test  #78: CleanupRecoveryTest.CompactionRetriesPendingTableRemoval .............................   Passed    0.03 sec
+        Start  79: CleanupRecoveryTest.RepeatedMaintenanceLeavesOnlyManifestLiveFiles
+ 79/117 Test  #79: CleanupRecoveryTest.RepeatedMaintenanceLeavesOnlyManifestLiveFiles ...................   Passed    0.03 sec
+        Start  80: DBCompactionTest.ZeroTablesIsANoOpAndClosedHandlesAreRejected
+ 80/117 Test  #80: DBCompactionTest.ZeroTablesIsANoOpAndClosedHandlesAreRejected ........................   Passed    0.02 sec
+        Start  81: DBCompactionTest.RewritesOneTableWithoutChangingTheActiveWal
+ 81/117 Test  #81: DBCompactionTest.RewritesOneTableWithoutChangingTheActiveWal .........................   Passed    0.02 sec
+        Start  82: DBCompactionTest.DropsAllTombstonesWithoutConsumingAFileNumber
+ 82/117 Test  #82: DBCompactionTest.DropsAllTombstonesWithoutConsumingAFileNumber .......................   Passed    0.02 sec
+        Start  83: DBCompactionTest.PreservesLogicalStateAndNewerMemtableAcrossReopen
+ 83/117 Test  #83: DBCompactionTest.PreservesLogicalStateAndNewerMemtableAcrossReopen ...................   Passed    0.03 sec
+        Start  84: CompactionRecoveryTest.FailuresBeforeManifestRenameKeepOldState
+ 84/117 Test  #84: CompactionRecoveryTest.FailuresBeforeManifestRenameKeepOldState ......................   Passed    0.14 sec
+        Start  85: CompactionRecoveryTest.ManifestSyncDirFailureFreezesUntilReopen
+ 85/117 Test  #85: CompactionRecoveryTest.ManifestSyncDirFailureFreezesUntilReopen ......................   Passed    0.03 sec
+        Start  86: CompactionRecoveryTest.CleanupExceptionDoesNotChangeCommittedSuccess
+ 86/117 Test  #86: CompactionRecoveryTest.CleanupExceptionDoesNotChangeCommittedSuccess .................   Passed    0.03 sec
+        Start  87: BackgroundCompactionTest.DropsOnlySafeOldestPrefixTombstoneAndReportsRawMetrics
+ 87/117 Test  #87: BackgroundCompactionTest.DropsOnlySafeOldestPrefixTombstoneAndReportsRawMetrics ......   Passed    0.02 sec
+        Start  88: BackgroundCompactionTest.LongMixedWorkloadMatchesReferenceAcrossReopen
+ 88/117 Test  #88: BackgroundCompactionTest.LongMixedWorkloadMatchesReferenceAcrossReopen ...............   Passed    0.53 sec
+        Start  89: BackgroundCompactionRecoveryTest.FailedCommitKeepsTheOldestPrefixRecoverable
+ 89/117 Test  #89: BackgroundCompactionRecoveryTest.FailedCommitKeepsTheOldestPrefixRecoverable .........   Passed    0.03 sec
+        Start  90: BackgroundCompactionRecoveryTest.ManifestSyncDirFailureFreezesUntilReopen
+ 90/117 Test  #90: BackgroundCompactionRecoveryTest.ManifestSyncDirFailureFreezesUntilReopen ............   Passed    0.03 sec
+        Start  91: ManifestPublishTest.FailuresBeforeRenameAreNotPublished
+ 91/117 Test  #91: ManifestPublishTest.FailuresBeforeRenameAreNotPublished ..............................   Passed    0.01 sec
+        Start  92: ManifestPublishTest.RenameFollowedBySyncDirFailureIsVisibleNotDurable
+ 92/117 Test  #92: ManifestPublishTest.RenameFollowedBySyncDirFailureIsVisibleNotDurable ................   Passed    0.02 sec
+        Start  93: ManifestPublishTest.DurablePublicationUpdatesCurrentSnapshot
+ 93/117 Test  #93: ManifestPublishTest.DurablePublicationUpdatesCurrentSnapshot .........................   Passed    0.01 sec
+        Start  94: FlushRecoveryTest.PreManifestRenameFailuresKeepOldStateRecoverable
+ 94/117 Test  #94: FlushRecoveryTest.PreManifestRenameFailuresKeepOldStateRecoverable ...................   Passed    0.05 sec
+        Start  95: FlushRecoveryTest.SecondFlushFailuresKeepPublishedTableAndWalRecoverable
+ 95/117 Test  #95: FlushRecoveryTest.SecondFlushFailuresKeepPublishedTableAndWalRecoverable .............   Passed    0.06 sec
+        Start  96: FlushRecoveryTest.ManifestSyncDirFailureFreezesDataOperationsUntilReopen
+ 96/117 Test  #96: FlushRecoveryTest.ManifestSyncDirFailureFreezesDataOperationsUntilReopen .............   Passed    0.02 sec
+        Start  97: FlushRecoveryTest.TerminalCloseReportsOnlyItsOwnFailureAndCanRetry
+ 97/117 Test  #97: FlushRecoveryTest.TerminalCloseReportsOnlyItsOwnFailureAndCanRetry ...................   Passed    0.01 sec
+        Start  98: FlushRecoveryTest.InitialManifestSyncDirFailureCanBeRecoveredByOpen
+ 98/117 Test  #98: FlushRecoveryTest.InitialManifestSyncDirFailureCanBeRecoveredByOpen ..................   Passed    0.02 sec
+        Start  99: FlushRecoveryTest.InitialCreationFailuresCanBeRetriedSafely
+ 99/117 Test  #99: FlushRecoveryTest.InitialCreationFailuresCanBeRetriedSafely ..........................   Passed    0.02 sec
+        Start 100: FlushRecoveryTest.NonEmptyPreManifestWalIsRejectedWithoutModification
+100/117 Test #100: FlushRecoveryTest.NonEmptyPreManifestWalIsRejectedWithoutModification ................   Passed    0.01 sec
+        Start 101: FlushRecoveryTest.ComplexPreManifestStatesAreRejectedAsCorruption
+101/117 Test #101: FlushRecoveryTest.ComplexPreManifestStatesAreRejectedAsCorruption ....................   Passed    0.01 sec
+        Start 102: FlushRecoveryTest.UnrelatedFilesDoNotBlockInitialCreation
+102/117 Test #102: FlushRecoveryTest.UnrelatedFilesDoNotBlockInitialCreation ............................   Passed    0.01 sec
+        Start 103: FlushRecoveryTest.OldWalCleanupFailureDoesNotChangeCommittedSuccess
+103/117 Test #103: FlushRecoveryTest.OldWalCleanupFailureDoesNotChangeCommittedSuccess ..................   Passed    0.02 sec
+        Start 104: FlushRecoveryTest.OldWalCloseExceptionDoesNotChangeCommittedSuccess
+104/117 Test #104: FlushRecoveryTest.OldWalCloseExceptionDoesNotChangeCommittedSuccess ..................   Passed    0.02 sec
+        Start 105: AsyncFlushRecoveryTest.BackgroundFailureIsStickyAndImmutableWalRecovers
+105/117 Test #105: AsyncFlushRecoveryTest.BackgroundFailureIsStickyAndImmutableWalRecovers ..............   Passed    0.02 sec
+        Start 106: CliTest.RejectsInvalidArgumentsBeforeOpeningDatabase
+106/117 Test #106: CliTest.RejectsInvalidArgumentsBeforeOpeningDatabase .................................   Passed    0.01 sec
+        Start 107: CliTest.SupportsPersistentPutGetScanAndDeleteCommands
+107/117 Test #107: CliTest.SupportsPersistentPutGetScanAndDeleteCommands ................................   Passed    0.02 sec
+        Start 108: CliTest.JsonOutputPreservesArbitraryBytesWithBase64
+108/117 Test #108: CliTest.JsonOutputPreservesArbitraryBytesWithBase64 ..................................   Passed    0.02 sec
+        Start 109: LabSessionTest.SerializesOperationsAndCopiesDiagnosticState
+109/117 Test #109: LabSessionTest.SerializesOperationsAndCopiesDiagnosticState ..........................   Passed    0.01 sec
+        Start 110: LabSessionTest.RotatesDetailedJsonlEventsAndSkipsPerOperationLogsInPerformanceMode
+110/117 Test #110: LabSessionTest.RotatesDetailedJsonlEventsAndSkipsPerOperationLogsInPerformanceMode ...   Passed    0.08 sec
+        Start 111: LabStorageInspectorTest.PagesCanonicalWalAndSstableBytesWithoutEscapingDatabase
+111/117 Test #111: LabStorageInspectorTest.PagesCanonicalWalAndSstableBytesWithoutEscapingDatabase ......   Passed    0.02 sec
+        Start 112: LabWorkloadTest.ReplaysFixedSeedWithTheSameOperationSequenceAndReferenceResult
+112/117 Test #112: LabWorkloadTest.ReplaysFixedSeedWithTheSameOperationSequenceAndReferenceResult .......   Passed    0.33 sec
+        Start 113: LabWorkloadTest.RejectsExternalWritesWhileTheDeterministicRunnerOwnsTheWritePath
+113/117 Test #113: LabWorkloadTest.RejectsExternalWritesWhileTheDeterministicRunnerOwnsTheWritePath .....   Passed    0.03 sec
+        Start 114: RecoveryLabTest.RunsAllScenariosOnlyInsideServerOwnedSandboxes
+114/117 Test #114: RecoveryLabTest.RunsAllScenariosOnlyInsideServerOwnedSandboxes .......................   Passed    0.04 sec
+        Start 115: RecoveryLabTest.RejectsSandboxPathThatResolvesOutsideTheServerRoot
+115/117 Test #115: RecoveryLabTest.RejectsSandboxPathThatResolvesOutsideTheServerRoot ...................   Passed    0.01 sec
+        Start 116: LabServerHttpTest.ServesLiveOperationsStateStorageAndReconnectableEvents
+116/117 Test #116: LabServerHttpTest.ServesLiveOperationsStateStorageAndReconnectableEvents .............   Passed    0.06 sec
+        Start 117: LabServerStaticTest.ServesPackagedUiFilesAndRejectsOversizedRecoveryRequests
+117/117 Test #117: LabServerStaticTest.ServesPackagedUiFilesAndRejectsOversizedRecoveryRequests .........   Passed    0.04 sec
+
+100% tests passed, 0 tests failed out of 117
+
+Total Test time (real) =   4.06 sec

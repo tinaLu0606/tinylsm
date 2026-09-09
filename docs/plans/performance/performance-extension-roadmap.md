@@ -6,7 +6,7 @@
 - 状态：`Goal 1/2/3 已完成；路线图与当前 revision Linux 部署 smoke 均已收束`
 - 基线提交：`16ed69f feat: finalize atomic batches and performance baseline`
 - 当前性能范围验收提交：`746741e docs: close performance extension roadmap`
-- 基线报告：`docs/performance/baseline-2026-09-06.md`
+- 基线报告：`reports/performance/baseline-2026-09-06.md`
 - 定位：三个性能 goal 的历史执行计划与证据索引；不自动派生 Goal 4
 
 原初版功能已经收口。后续路线不再拆成大量小 ticket，而是让一个 Codex goal
@@ -84,12 +84,12 @@ Goal 3：Compaction 演进
 | Goal | 已实现的最小策略 | 验收证据 | 延期/边界 |
 | --- | --- | --- | --- |
 | Goal 1 读取 | validated bounded Block Cache + shared read lock | fixed Linux 两轮 raw JSON、profile、Debug/ASan/TSan `101/101`、Release | Bloom Filter：cache 后的 negative lookup 不再由重复 decode/CRC 主导，按条件延期 |
-| Goal 2 写入 | 一个 immutable MemTable/WAL + 单 background flush worker | fixed Linux 两轮 raw JSON、Debug/ASan/TSan `102/102`、Release | Group Commit：没有 multiwriter queue profile 证明其调度/故障复杂度值得引入 |
+| Goal 2 写入 | 一个 immutable MemTable/WAL + 单 background flush worker | fixed Linux 两轮 raw JSON、Debug/ASan/TSan `102/102`、Release | 本表是 2026-09-07 的性能收束；后续 Goal 6 已实现 Group Commit 语义，尚未增加性能结论 |
 | Goal 3 Compaction | oldest-prefix simplified size-tiered + 单 background compaction worker | fixed Linux 两轮 raw JSON、Debug/ASan/TSan `107/107`、Release、reopen/fault/mixed workload | leveled layout：没有实现可比方案；现有策略已满足 table pressure 和前台读尾延迟目标 |
 
 三个 workload 的操作比例、计时边界和指标不同，上表只用于定位证据，不能把不同
 行的吞吐、RSS 或 p99 组成一个“总分”。跨 goal 的结论、原始数据链接和未知项见
-`docs/performance/performance-extension-closeout-2026-09-08.md`。
+`reports/performance/performance-extension-closeout-2026-09-08.md`。
 
 ## 3. Goal 1：读取路径性能扩展
 
@@ -151,10 +151,10 @@ Goal 3：Compaction 演进
 
 - 目标 benchmark、两轮 fixed-Linux 原始 JSON、profile、Block Cache 与 shared
   read-lock 验收已完成；详见
-  `docs/performance/read-path-2026-09-07.md`。
+  `reports/performance/read-path-2026-09-07.md`。
 - Bloom Filter 因 cache 后 negative lookup 已消除重复 decode/CRC 热点而暂不加入。
 - Goal 2 已完成；其固定 Linux 验收和 Group Commit 的延期依据见
-  `docs/performance/write-path-2026-09-07.md`。
+  `reports/performance/write-path-2026-09-07.md`。
 
 ## 4. Goal 2：异步写入路径扩展
 
@@ -195,10 +195,14 @@ Goal 3：Compaction 演进
 
 #### D. 条件项：Group Commit
 
-- 只有 profile 显示 sync 或 writer 竞争仍是主要成本时才加入。
+- 此性能路线图收束时，只有 profile 显示 sync 或 writer 竞争仍是主要成本才建议加入。
 - writer queue 必须有界；leader 可合并兼容请求，但保持每个 WriteBatch 的原子
   边界、sequence 和返回状态。
 - append/sync 失败时，每个等待者得到与 durable 状态一致的结果。
+
+后续工程 Goal 6 已实现上述语义；它没有借用本路线图的单 writer/per-write 性能数据声称
+吞吐收益。当前实现、功能验证与后续 multiwriter 实验边界见
+`docs/plans/next-engineering-goals.md`。
 
 ### 完成标准
 
@@ -222,9 +226,10 @@ Goal 3：Compaction 演进
 - Manifest v3 active/immutable WAL recovery、一个有界 immutable generation 和单
   background flush worker 已完成；故障、Close、reopen 与背压边界已覆盖。
 - fixed-Linux 两轮 raw JSON、环境、benchmark log 和 verifier 已保存；详见
-  `docs/performance/write-path-2026-09-07.md`。
-- Group Commit 没有实现。这是条件项的显式延期：当前测量没有 multiwriter queue
-  profile，不能证明新增 queue/batching 的收益足以覆盖持久化错误语义复杂度。
+  `reports/performance/write-path-2026-09-07.md`。
+- 当时 Group Commit 没有实现：当前测量没有 multiwriter queue profile，不能证明新增
+  queue/batching 的性能收益足以覆盖持久化错误语义复杂度。后续 Goal 6 已完成有界 queue
+  与 Group Commit 的功能实现；该结论仍不构成其性能收益证明。
 
 ## 5. Goal 3：Compaction 与综合性能扩展
 
@@ -294,14 +299,14 @@ Goal 3：Compaction 演进
   原始 amplification/debt/tail-latency metrics 已完成。
 - fixed-Linux 两轮 raw JSON、环境和 benchmark log 已保存；三套 fixed-Linux suite
   均为 `107/107`，Release 与 JSON verifier 通过。详见
-  `docs/performance/compaction-2026-09-08.md`。
+  `reports/performance/compaction-design-and-results-2026-09-08.md`。
 - leveled layout 没有实现；这不是遗漏。当前结果已显示 size-tiered 的 read/table
   pressure 收益及 write-amplification 代价，尚无证据证明应引入新的 level metadata、
   overlap selection 和 scheduler。
 - 已从 Git bundle clone 的干净 checkout（`746741e`，工作树为空）完成固定 Linux
   Release CLI smoke：`put -> reopen -> get -> scan`，并验证文本与 Base64 JSON 输出。
   环境、Release build、CLI 和断言日志位于
-  `docs/performance/results/goal3-release-smoke-linux-2026-09-08-*`。Lab UI submodule
+  `reports/performance/results/goal3-release-smoke-linux-2026-09-08-*`。Lab UI submodule
   未初始化，但 Release CLI 不依赖它；该 smoke 不对 Lab UI 作出部署声明。
 
 ## 6. 路线图结束后的建议
@@ -317,3 +322,8 @@ leveled layout 就自动启动下一项。它们都需要新的 workload/profile
 后续工作应先从实际使用场景或新的 profile 选择，例如高并发 writer 的 group-commit
 profile、cache 后仍昂贵的 negative lookup，或规模更大时的 compaction write cost；没有
 证据前不建议直接扩展为成熟 RocksDB 式多 level 系统。
+
+性能路线结束后的学习方向调研与推荐顺序见
+`docs/plans/post-performance-learning-roadmap.md`；该文档是候选路线，不自动创建或
+执行新的实现 Goal。可直接创建的三个大型实现 Goal 及各自专项验收见
+`docs/plans/next-engineering-goals.md`。

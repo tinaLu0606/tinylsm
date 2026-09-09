@@ -34,8 +34,9 @@ workload point-read amplification 从约 `16.4` 降到 `2.14`，但 write amplif
 
 - Bloom Filter：Goal 1 的 cache 后 negative lookup 已不再被重复 decode/CRC 主导；没有
   证据支持增加新 per-table metadata format。
-- Group Commit：Goal 2 没有 multiwriter queue contention profile，尚不能证明 batching
-  值得引入新的 queue、sequence 和 durable-error semantics。
+- Group Commit：Goal 2 没有 multiwriter queue contention profile，因而当时不能证明
+  batching 值得引入新的 queue、sequence 和 durable-error semantics。后续 Goal 6 已实现
+  其功能语义，但正式吞吐/尾延迟结论仍待单独 multiwriter 实验。
 - Leveled compaction：Goal 3 的 size-tiered 已以可解释的 write-amplification 代价降低
   table pressure 和前台读尾延迟；没有已测 leveled A/B，不能声称它更优。
 

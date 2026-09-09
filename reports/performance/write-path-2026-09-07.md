@@ -106,12 +106,13 @@ validated its JSON with `scripts/verify_write_benchmark_json.cmake`.
 
 ## Group-commit decision and limits
 
-Group commit is deliberately not implemented. The conditional item requires a
-profile showing sync or writer-queue contention as the next dominant cost. This
-workload establishes the per-write sync cost, but it does not profile a bounded
-multiwriter queue or prove a safe batching policy; adding one now would hide an
-unmeasured scheduling trade-off. `WriteBatch` retains its existing atomic WAL
-record boundary.
+At the time of this 2026-09-07 experiment, group commit was deliberately not
+implemented. The workload establishes the per-write sync cost, but it does not
+profile a bounded multiwriter queue or prove a batching performance benefit.
+Goal 6 subsequently implemented the bounded queue and its functional contract;
+this historical experiment still provides no throughput or latency claim for
+that implementation. See `docs/plans/next-engineering-goals.md` for its
+separately scheduled multiwriter experiment.
 
 This is still a learning prototype: live SSTable readers retain file handles
 until explicit full compaction or close. The benchmark's 134 live tables stays

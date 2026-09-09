@@ -3,7 +3,9 @@
 TinyLSM is a compact C++20 key-value storage engine built to explore the core
 mechanics of an LSM tree: write-ahead logging, ordered in-memory state, immutable
 SSTables, manifest-based recovery, tombstones, checksums, and crash-aware file
-publication.
+publication. New tables use a versioned prefix-compressed SSTable v2 format;
+the Reader remains compatible with v1 tables. The engine also exposes
+process-local Snapshot reads and pull-based iterators over a consistent MVCC view.
 
 The project is intentionally small enough to inspect end to end. It is a
 learning-oriented prototype rather than a production database. The write path
@@ -13,8 +15,9 @@ generation into an ordered set of SSTables. Range scans lazily merge active
 memory, immutable memory, and tables. A bounded worker then performs simplified
 size-tiered compaction of the oldest table prefix when its table-count trigger
 is reached; callers can still run an explicit synchronous full compaction.
-`Get`, `Scan`, and diagnostic snapshots share a read lock; writes and close
-coordinate state with the exclusive lock, so a long Scan can delay a writer.
+Creating `Get`, `Scan`, a Snapshot, or an Iterator briefly shares the state
+lock; a public Iterator then owns its captured MemTable entries and SSTable
+reader references, so long `Next()` loops do not hold the DB state lock.
 
 ## Quick start
 
@@ -200,14 +203,16 @@ int main() {
 ```
 
 Keys and values are byte strings. Database handles are movable but non-copyable.
-`Get`, `Scan`, and diagnostic snapshots share a read lock; writes, compaction,
-and close use the exclusive state boundary. Moving or destroying a handle still
-requires exclusive ownership.
+`Get`, `Scan`, Snapshot creation, and Iterator creation share a read lock;
+writes, compaction, and close use the exclusive state boundary. Moving or
+destroying a handle still requires exclusive ownership.
 
 `WriteBatch` groups several ordered `Put`/`Delete` operations into one WAL
-record and one optional WAL sync. Recovery applies a complete record in full
-and discards an incomplete final record in full, so a crash cannot expose half
-of the batch. This is atomicity, not isolation across multiple DB handles and
+record and one optional WAL sync. Concurrent public requests enter a bounded
+group-commit queue; a leader may encode several complete batches into one
+physical WAL frame and sync. Recovery applies a complete frame in full and
+discards an incomplete final frame in full, so a crash cannot expose half of a
+public batch. This is atomicity, not isolation across multiple DB handles and
 not rollback-capable transactions.
 
 ```cpp
@@ -217,10 +222,29 @@ batch.Put("account:b", "110");
 auto status = db->Write(batch);
 ```
 
+`GetSnapshot()` pins the current logical sequence without copying the database.
+Pass that handle to `Get` or `NewIterator` to read the same view while writers,
+flush, and compaction continue. Snapshots are process-local and are not valid
+after reopen; `Options::max_active_snapshots` defaults to 1,024 to make a
+forgotten retention handle a bounded resource error.
+
+```cpp
+auto snapshot = db->GetSnapshot();
+auto old_value = db->Get("account:a", snapshot.value().get());
+auto it = db->NewIterator({}, {}, snapshot.value().get());
+while (it.value()->Valid())
+  it.value()->Next();
+```
+
+`GetSnapshotMetrics()` reports active Snapshot count, its oldest sequence, and
+versions/bytes retained by the last full-table compaction. A live Snapshot can
+retain old versions at approximately `overwrite rate × average record bytes × age`.
+
 `GetWriteMetrics()` returns cumulative, point-in-time write-path counters for
-one handle: WAL syncs, MemTable rotations, successful/failed background flushes,
-backpressure waits and duration, plus current and maximum immutable-generation
-queue depth/bytes. It is an observability aid, not a latency benchmark by itself.
+one handle: WAL syncs, physical groups, grouped request count, writer-queue
+wait/depth, MemTable rotations, successful/failed background flushes, and
+immutable-generation queue depth/bytes. It is an observability aid, not a
+latency benchmark by itself.
 
 `GetReadMetrics()` additionally exposes raw point-lookup, range-scan, table-probe
 and scan-table-input counts. `GetCompactionMetrics()` exposes compaction
@@ -231,15 +255,18 @@ opaque score.
 
 ## Implemented scope
 
-- WAL-first `Put`, `Delete`, and atomic `WriteBatch`, with optional per-write or
-  per-batch synchronization, active/immutable WAL rotation, and one bounded
-  background MemTable flush worker.
-- An ordered MemTable that keeps the newest sequence for each user key.
+- WAL-first `Put`, `Delete`, and atomic `WriteBatch`, with a bounded
+  group-commit queue, optional per-group synchronization, active/immutable WAL
+  rotation, and one bounded background MemTable flush worker.
+- An ordered MemTable and SSTable v2 format that retain MVCC versions in
+  `(user key, sequence descending)` order. v2 prefix-compresses user keys,
+  persists restart offsets and checksummed table properties, while retaining
+  v1 read compatibility.
 - Immutable, block-indexed SSTables with CRC32C integrity checks and complete
   validation of Manifest-referenced table data during startup.
 - Tombstones that hide deleted values across memory and disk.
-- Half-open ordered range scans that merge active MemTable, immutable MemTable,
-  and SSTable state.
+- Pull-based public Iterators and half-open materialized Scans over active
+  MemTable, immutable MemTable, and SSTable state, with optional Snapshots.
 - Default bounded background size-tiered compaction: once four tables are live,
   merge the oldest contiguous prefix into zero or one replacement. Set
   `Options::compaction_table_trigger = 0` to disable automatic scheduling.
@@ -276,7 +303,7 @@ opaque score.
                  +-----------+  +-----------+
                  |    WAL    |  | MemTable  |
                  | append +  |  | ordered   |
-                 | replay    |  | latest key|
+                 | replay    |  | MVCC keys |
                  +-----------+  +-----+-----+
                                         |
                                         | flush
@@ -315,10 +342,11 @@ The main modules are:
 
 ```text
 Put/Delete or WriteBatch
-    -> validate sizes and allocate a sequence number
-    -> append one complete record to WAL
-    -> optionally fsync WAL
-    -> apply one entry or the complete batch to MemTable
+    -> validate and enter the bounded writer queue
+    -> leader assigns consecutive sequences to complete requests
+    -> append one complete WAL batch for the selected group
+    -> optionally fsync WAL once for that group
+    -> apply every group entry to MemTable, then wake callers
     -> when full, create next active WAL and durably publish
        {active WAL, one immutable WAL} in Manifest v3
     -> move old MemTable/WAL to the one-item immutable generation
@@ -341,16 +369,17 @@ selection shapes would have to preserve the tombstone.
 
 ### Read and scan paths
 
-`Get` checks the MemTable first because it contains newer sequence numbers, then
-searches live SSTables from newest to oldest. A tombstone is returned internally
-as the newest state but exposed to the caller as `NotFound`.
+`Get` selects the largest sequence no later than the requested Snapshot from
+the active MemTable, immutable MemTable, and live SSTables. A tombstone is
+returned internally as the selected state but exposed to the caller as
+`NotFound`.
 
-`Scan` creates borrowing iterators for the MemTable and each relevant SSTable,
-then lazily merges them in byte-wise key order. Duplicate keys resolve to the
-largest sequence and tombstones are removed from the public result. SSTable
-iterators keep at most one decoded block at a time; a later block failure makes
-the whole scan fail instead of returning a partial result. The public API still
-materializes the final `vector<Entry>`.
+`NewIterator` captures MemTable versions and shared SSTable readers, then
+lazily merges them in byte-wise key order and filters to each key's visible
+sequence. It is pull-based: only `Next()` advances it. SSTable iterators keep
+at most one decoded block at a time. `Scan` uses this same path but materializes
+the final `vector<Entry>`; a later block failure makes the materialized Scan
+fail instead of returning a partial result.
 
 ### Asynchronous flush commit protocol
 
@@ -368,10 +397,13 @@ active MemTable/WAL reaches threshold
 ### Compaction commit protocol
 
 Automatic compaction merges the oldest contiguous table prefix through the same
-internal iterator path as `Scan`. It keeps the newest sequence for each key and
-drops tombstones only for that oldest prefix. The worker durable-reserves its
-output number before reading its shared reader snapshot outside the state lock;
-flush and compaction serialize their Manifest updates at the same state boundary.
+internal iterator path as `Scan`. A partial prefix preserves all versions; a
+full-table compaction retains every version newer than the oldest active
+Snapshot plus one version visible at that watermark. With no active Snapshot it
+keeps only the latest live value and can discard its tombstone. The worker
+durable-reserves its output number before reading its shared reader snapshot
+outside the state lock; flush and compaction serialize their Manifest updates at
+the same state boundary.
 
 `Compact()` remains a synchronous full-table maintenance operation. It waits for
 background work, keeps the historical single-Manifest fault boundary, and does
@@ -435,9 +467,10 @@ be recovered during an in-place format transition.
 Manifest version 3 stores an active WAL, an optional immutable WAL, and live
 tables in oldest-to-newest order, protected by CRC32C over its header and
 Protobuf payload. The reader accepts fixed version-1 and version-2 snapshots,
-which have no immutable WAL. Because the current SSTable format has no table-level
-sequence properties block, startup reads every live data block to verify the
-Manifest metadata; Open therefore costs `O(total live SSTable bytes)`.
+which have no immutable WAL. SSTable v2 adds checksummed entry-count, key-range,
+and sequence-range properties, but startup deliberately still reads every live
+data block to verify those properties and the Manifest metadata; Open therefore
+remains `O(total live SSTable bytes)`.
 
 ## Current limitations
 
@@ -452,9 +485,14 @@ TinyLSM currently favors clarity and testability over feature breadth:
 - There is no Bloom filter. SSTable decoded blocks have an in-memory bounded
   LRU cache (8 MiB by default; `Options::block_cache_bytes = 0` disables it).
   The cache is not persistent and only stores successfully validated blocks.
-- There is no group commit, snapshot isolation, or general multi-record
-  transaction/rollback facility. Read operations can run concurrently, but a
-  Scan holds a shared lock while materializing its result.
+- With the decoded-block cache disabled, v2 point lookup uses restart offsets
+  to search and reconstruct one restart group. With caching enabled it uses the
+  complete validated decoded block; no before/after performance result is
+  claimed yet.
+- Snapshots provide only read-only, process-local sequence visibility; there is
+  no read-write transaction, conflict detection, serializable isolation, or
+  general rollback facility. `Options::max_active_snapshots` bounds handle
+  count but not the bytes retained by a long-lived handle.
 - The POSIX filesystem path is the implemented persistent backend.
 - Packaging and installation rules are not implemented yet.
 
@@ -465,21 +503,21 @@ formats visible while leaving clear next steps toward a fuller LSM engine.
 
 The reproducible Release workloads, raw JSON output, macOS pre/post comparison,
 same-machine Linux/LevelDB results, and fixed Lima VM definition are documented in
-[`docs/performance/baseline-2026-09-06.md`](docs/performance/baseline-2026-09-06.md).
+[`reports/performance/baseline-2026-09-06.md`](reports/performance/baseline-2026-09-06.md).
 The follow-up work is split into independently verifiable Codex goals in
-[`docs/plans/performance-extension-roadmap.md`](docs/plans/performance-extension-roadmap.md).
+[`docs/plans/performance/performance-extension-roadmap.md`](docs/plans/performance/performance-extension-roadmap.md).
 Goal 1's fixed-Linux profile, raw before/after JSON, cache accounting, and
 concurrency result are in
-[`docs/performance/read-path-2026-09-07.md`](docs/performance/read-path-2026-09-07.md).
+[`reports/performance/read-path-2026-09-07.md`](reports/performance/read-path-2026-09-07.md).
 Goal 3's strategy decision, tombstone rule, raw metric contract, two fixed-Linux
 JSON runs, tail-latency/space-amplification evidence, and acceptance results are in
-[`docs/performance/compaction-2026-09-08.md`](docs/performance/compaction-2026-09-08.md).
+[`reports/performance/compaction-design-and-results-2026-09-08.md`](reports/performance/compaction-design-and-results-2026-09-08.md).
 Goal 2's bounded asynchronous-write design, two fixed-Linux raw JSON runs,
 latency/stall/RSS evidence, and failure boundary are in
-[`docs/performance/write-path-2026-09-07.md`](docs/performance/write-path-2026-09-07.md).
+[`reports/performance/write-path-2026-09-07.md`](reports/performance/write-path-2026-09-07.md).
 The Goal 1-3 evidence index, conditional deferrals, and fixed-Linux Release CLI
 deployment-smoke evidence are in
-[`docs/performance/performance-extension-closeout-2026-09-08.md`](docs/performance/performance-extension-closeout-2026-09-08.md).
+[`reports/performance/performance-extension-closeout-2026-09-08.md`](reports/performance/performance-extension-closeout-2026-09-08.md).
 The baseline is descriptive and is not yet a CI performance gate.
 The baseline's recorded Linux run passed 97/97 tests in Debug, ASan/UBSan, and
 Clang TSan, plus the Release build and deployment smoke test. Recreate it with
@@ -487,3 +525,11 @@ Clang TSan, plus the Release build and deployment smoke test. Recreate it with
 Goal 3 `./scripts/run_linux_compaction_goal3.sh <output-dir>` inside the VM to
 retain the environment, test logs, Release build log, complete benchmark JSON,
 and verification evidence in one output directory.
+
+Goals 4-6 have a separately prepared, Release-only fixed-Linux runner:
+`./scripts/run_linux_next_goals.sh <output-dir>`. It records two raw JSON runs
+for Snapshot/Iterator, SSTable v2 format, and bounded Group Commit, then rejects
+any case whose two-run median CV exceeds 10%. Its matrix and interpretation
+limits are in
+[`docs/plans/performance/goals-4-6-experiment-contract-2026-09-09.md`](docs/plans/performance/goals-4-6-experiment-contract-2026-09-09.md).
+It is prepared but has not yet produced a Linux performance claim.

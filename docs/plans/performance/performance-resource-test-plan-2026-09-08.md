@@ -17,6 +17,10 @@
 引擎裸吞吐。Lab 在每次操作周围会读取状态、目录和指标，适合观察 WAL、MemTable、SST 与
 Compaction 生命周期；严肃 benchmark 必须只计时 `DB::Put/Get/Scan/Compact` 的目标循环。
 
+本文件只规划当前引擎的量化性能实验，目标是形成可以诚实写入简历的数字。未来 Snapshot/
+MVCC、SSTable v2 和 Group Commit 的专项 before/after 与正确性验收，不混入本文件，统一放在
+`docs/plans/next-engineering-goals.md` 的对应 Goal 中。
+
 ## 2. 已有基线与本次起点
 
 已有报告已经建立了三个可复现的 Linux Release 基线：
@@ -169,3 +173,89 @@ queue contention 是主成本时，才讨论 Group Commit；单线程 async/sync
 - 不将 Linux VM 的数值包装为这台 Mac 的通用性能，也不拿 TinyLSM 与 LevelDB/RocksDB 做
   不同 durability 或配置下的产品排名。
 - 不用 Lab UI 的 ops/s、p99 或 Mock 数据作为正式 benchmark 证据。
+
+## 9. 面向简历的三组量化实验
+
+现有 P0-P4 是具体测试矩阵；本节把它们收束为三组可以对外解释的实验。每组必须独立完成
+两轮 fixed-Linux Release 运行，保留原始 JSON，不能从不同 workload 中拼接最好数字。
+
+### 实验 A：读取效率与并发扩展
+
+要回答的问题：Block Cache 和 shared-read 让哪些读取更快，多 reader 能扩展到什么程度？
+
+| 维度 | 固定对照 | 简历候选指标 |
+| --- | --- | --- |
+| 热点读取 | cache=0 与默认 8 MiB；同一 256-key working set | ops/s 提升倍数、cache hit rate、cache charge |
+| 单表/多表读取 | 相同 key/value、表数和命中位置 | single/multi-table hit、negative miss、table probes |
+| Scan | 相同返回条数；单表与多表 | entries/s、p50/p95/p99、block decodes、峰值 RSS |
+| 并发读 | 固定 40,000 总操作；1/2/4/8 reader | 总吞吐、相对 1-reader speedup、parallel efficiency |
+
+`parallel efficiency = N-reader speedup / N`。例如 4 reader 是单 reader 的 2 倍吞吐，
+效率是 `2/4=50%`；它比只写“支持并发”更能说明扩展边界。
+
+### 实验 B：写入吞吐与前台停顿
+
+要回答的问题：bounded background flush 在保持内存有界时，减少了多少前台 stall？
+
+| 维度 | 固定对照 | 简历候选指标 |
+| --- | --- | --- |
+| async write | 固定 100,000 Put、value 和 MemTable 大小 | ops/s、Put p95/p99、rotation/flush 次数 |
+| sync write | 固定 20,000 Put、`sync_on_write=true` | ops/s、p95/p99、`wal_syncs` |
+| backpressure | 小 MemTable、同一写入量 | wait 次数、累计等待、最长/高分位 stall |
+| 资源 | 同一 workload wrapper | peak RSS、最大 immutable bytes/queue depth、输出 SST bytes |
+
+简历结论必须把 async 与 sync 分开。async 的高吞吐不能表述成“每次写入都已落盘”；sync
+的吞吐才对应每次确认前 WAL 同步的语义。
+
+### 实验 C：Compaction 的收益与代价
+
+要回答的问题：后台 partial compaction 用多少额外写入，换来多少 table/read pressure 降低？
+
+| 维度 | 固定对照 | 简历候选指标 |
+| --- | --- | --- |
+| 策略 | Manual 与 SizeTiered；同 seed/mix/options | point-read amplification、table count/debt |
+| 代价 | 同 logical writes/live bytes | write amplification、space amplification |
+| 前台体验 | 同 20,000 mixed operations | Put/Get/Scan p95/p99、总 ops/s |
+| 规模曲线 | P0、S1、S2 | 指标随 20k/100k/1m operations 的变化 |
+
+Compaction 不应只宣传吞吐提升。若 read amplification 降低但 write amplification 上升，
+两者必须一起报告，这正是 LSM 策略真正的工程权衡。
+
+## 10. 可选的同条件 LevelDB 对照
+
+LevelDB 对照适合提供参照系，但不是必须完成的产品排名。只有以下条件都能对齐时才写入
+正式报告：
+
+- 相同 Linux VM、guest-local ext4、编译模式、key/value、操作数和线程数；
+- compression 同为关闭或明确分别报告；Block Cache 预算一致；
+- sync/async durability 含义一致；数据库都经过相同填充、flush/compaction 预处理；
+- 分开比较 Put、Get、missing Get 和 Scan，不使用一个综合分数；
+- 同样报告两轮 median/CV，不能只选择 TinyLSM 最有利的 case。
+
+LevelDB 更快或更慢都不是失败；有价值的是能解释差异来自格式、cache、compaction、锁还是
+durability 配置。
+
+## 11. 简历数字的准入规则与交付物
+
+一个数字只有同时满足以下条件，才进入最终简历候选表：
+
+1. fixed-Linux 两次独立运行方向一致，目标 case CV < 10%；
+2. workload、数据规模、durability、cache 和线程数可以用一句话说清；
+3. raw JSON、environment、revision 和验证脚本都已保存；
+4. 提升同时给出 before、after 和代价指标，不只给百分比；
+5. 没有把微基准外推成生产数据库能力。
+
+最终新增一份 `reports/performance/portfolio-benchmark-YYYY-MM-DD.md`，包含：
+
+```text
+一句话结论
+-> workload 与环境
+-> 两轮 median/CV
+-> raw JSON 链接
+-> 代价与适用边界
+-> 可直接改写成简历 bullet 的中文/英文候选句
+```
+
+推荐最终只选 2-3 个最有解释力的数字：读取 cache 收益与并发扩展、background flush 的
+尾延迟/背压、partial compaction 的 read-vs-write amplification 权衡。数字少但证据完整，
+比罗列十几个 ops/s 更可信。

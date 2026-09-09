@@ -1,0 +1,97 @@
++ cmake --preset benchmark
+Preset CMake variables:
+
+  BUILD_TESTING:BOOL="FALSE"
+  CMAKE_BUILD_TYPE="Release"
+  CMAKE_EXPORT_COMPILE_COMMANDS:BOOL="TRUE"
+  TINYLSM_BENCHMARK_LEVELDB:BOOL="TRUE"
+  TINYLSM_BUILD_BENCHMARKS:BOOL="TRUE"
+  TINYLSM_BUILD_TOOLS:BOOL="FALSE"
+
+-- 
+-- 29.3.0
+-- Google Benchmark version: v1.9.5, normalized to 1.9.5
+-- Configuring done (0.2s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/tina.guest/tinylsm-goal4-20260908/build/benchmark
++ cmake --build --preset benchmark
+ninja: no work to do.
++ /home/tina.guest/tinylsm-goal4-20260908/build/benchmark/benchmarks/tinylsm_bench --benchmark_filter=\^TinyLSM/Snapshot\(MaterializedScan\|Iterator\|RetentionHeld\|RetentionReleased\|WriterOverlap\) --benchmark_out=/home/tina.guest/tinylsm-goal4-20260908/artifacts/final-run1/snapshot-goal4.json --benchmark_out_format=json --benchmark_report_aggregates_only=true --benchmark_display_aggregates_only=true --benchmark_enable_random_interleaving=true
+2026-09-08T22:58:40+08:00
+Running /home/tina.guest/tinylsm-goal4-20260908/build/benchmark/benchmarks/tinylsm_bench
+Run on (4 X 48 MHz CPU s)
+Load Average: 1.32, 2.35, 1.73
+--------------------------------------------------------------------------------------------------------------------------------------------------
+Benchmark                                                                                        Time             CPU   Iterations UserCounters...
+--------------------------------------------------------------------------------------------------------------------------------------------------
+TinyLSM/SnapshotIterator10K/iterations:1/repeats:5/manual_time_mean                        9279737 ns     24461125 ns            5 bytes_per_second=1.1661Gi/s first_result_ns=296.396k items_per_second=10.7939M/s operations=100k ops_per_second=10.7939M/s peak_rss_kb=619.802k snapshot_sequence=10k
+TinyLSM/SnapshotIterator10K/iterations:1/repeats:5/manual_time_median                      9452598 ns     24624832 ns            5 bytes_per_second=1.1429Gi/s first_result_ns=297.272k items_per_second=10.5791M/s operations=100k ops_per_second=10.5791M/s peak_rss_kb=575.536k snapshot_sequence=10k
+TinyLSM/SnapshotIterator10K/iterations:1/repeats:5/manual_time_stddev                       418319 ns       462497 ns            5 bytes_per_second=54.4512Mi/s first_result_ns=6.38597k items_per_second=492.209k/s operations=833u ops_per_second=492.209k/s peak_rss_kb=98.9827k snapshot_sequence=83.3u
+TinyLSM/SnapshotIterator10K/iterations:1/repeats:5/manual_time_cv                             4.51 %          1.89 %             5 bytes_per_second=4.56% first_result_ns=2.15% items_per_second=4.56% operations=0.00% ops_per_second=4.56% peak_rss_kb=15.97% snapshot_sequence=0.00%
+TinyLSM/SnapshotRetentionReleased60s/iterations:1/repeats:5/manual_time_mean              23829836 ns     35112907 ns            5 active_snapshots=0 bytes_per_second=64.9984Mi/s items_per_second=587.55k/s operations=14k ops_per_second=587.55k/s overwrite_generations=6 retained_bytes=232.05k retained_versions=2.005k
+TinyLSM/SnapshotRetentionReleased60s/iterations:1/repeats:5/manual_time_median            23861315 ns     35117828 ns            5 active_snapshots=0 bytes_per_second=64.907Mi/s items_per_second=586.724k/s operations=14k ops_per_second=586.724k/s overwrite_generations=6 retained_bytes=232.05k retained_versions=2.005k
+TinyLSM/SnapshotRetentionReleased60s/iterations:1/repeats:5/manual_time_stddev              247995 ns       241395 ns            5 active_snapshots=0 bytes_per_second=696.598Ki/s items_per_second=6.14928k/s operations=116.62u ops_per_second=6.14928k/s overwrite_generations=49.98n retained_bytes=1.93298m retained_versions=16.7017u
+TinyLSM/SnapshotRetentionReleased60s/iterations:1/repeats:5/manual_time_cv                    1.04 %          0.69 %             5 active_snapshots=0.00% bytes_per_second=1.05% items_per_second=1.05% operations=0.00% ops_per_second=1.05% overwrite_generations=0.00% retained_bytes=0.00% retained_versions=0.00%
+TinyLSM/SnapshotWriterOverlapIterator/iterations:1/repeats:5/manual_time_mean             12108607 ns    151956766 ns            5 bytes_per_second=965.436Mi/s items_per_second=8.727M/s operations=105k ops_per_second=8.727M/s write_lock_acquisitions=5k write_lock_wait_ns=4.5491M writer_p50_us=1.4488 writer_p95_us=1.6746 writer_p99_us=2.1768
+TinyLSM/SnapshotWriterOverlapIterator/iterations:1/repeats:5/manual_time_median           11785417 ns    151870373 ns            5 bytes_per_second=985.604Mi/s items_per_second=8.90932M/s operations=105k ops_per_second=8.90932M/s write_lock_acquisitions=5k write_lock_wait_ns=4.11208M writer_p50_us=1.464 writer_p95_us=1.672 writer_p99_us=2.146
+TinyLSM/SnapshotWriterOverlapIterator/iterations:1/repeats:5/manual_time_stddev            1138363 ns       316967 ns            5 bytes_per_second=81.6891Mi/s items_per_second=738.424k/s operations=874.65u ops_per_second=738.424k/s write_lock_acquisitions=41.65u write_lock_wait_ns=1.14029M writer_p50_us=0.022687 writer_p95_us=0.0619136 writer_p99_us=0.0762312
+TinyLSM/SnapshotWriterOverlapIterator/iterations:1/repeats:5/manual_time_cv                   9.40 %          0.21 %             5 bytes_per_second=8.46% items_per_second=8.46% operations=0.00% ops_per_second=8.46% write_lock_acquisitions=0.00% write_lock_wait_ns=25.07% writer_p50_us=1.57% writer_p95_us=3.70% writer_p99_us=3.50%
+TinyLSM/SnapshotRetentionHeld10s/iterations:1/repeats:5/manual_time_mean                  17428613 ns     16385309 ns            5 active_snapshots=1 bytes_per_second=25.3923Mi/s items_per_second=229.532k/s operations=4k ops_per_second=229.532k/s overwrite_generations=1 retained_bytes=464k retained_versions=4k
+TinyLSM/SnapshotRetentionHeld10s/iterations:1/repeats:5/manual_time_median                17414080 ns     16323418 ns            5 active_snapshots=1 bytes_per_second=25.4108Mi/s items_per_second=229.699k/s operations=4k ops_per_second=229.699k/s overwrite_generations=1 retained_bytes=464k retained_versions=4k
+TinyLSM/SnapshotRetentionHeld10s/iterations:1/repeats:5/manual_time_stddev                  202318 ns        94088 ns            5 active_snapshots=8.33n bytes_per_second=301.292Ki/s items_per_second=2.65968k/s operations=33.32u ops_per_second=2.65968k/s overwrite_generations=8.33n retained_bytes=3.86512m retained_versions=33.32u
+TinyLSM/SnapshotRetentionHeld10s/iterations:1/repeats:5/manual_time_cv                        1.16 %          0.57 %             5 active_snapshots=0.00% bytes_per_second=1.16% items_per_second=1.16% operations=0.00% ops_per_second=1.16% overwrite_generations=0.00% retained_bytes=0.00% retained_versions=0.00%
+TinyLSM/SnapshotWriterOverlapMaterializedScan/iterations:1/repeats:5/manual_time_mean     16029127 ns    154162775 ns            5 bytes_per_second=739.791Mi/s items_per_second=6.6873M/s operations=105k ops_per_second=6.6873M/s write_lock_acquisitions=5k write_lock_wait_ns=4.98576M writer_p50_us=1.4698 writer_p95_us=1.8118 writer_p99_us=2.3882
+TinyLSM/SnapshotWriterOverlapMaterializedScan/iterations:1/repeats:5/manual_time_median   14850351 ns    153226666 ns            5 bytes_per_second=782.187Mi/s items_per_second=7.07054M/s operations=105k ops_per_second=7.07054M/s write_lock_acquisitions=5k write_lock_wait_ns=4.1567M writer_p50_us=1.463 writer_p95_us=1.668 writer_p99_us=2.21
+TinyLSM/SnapshotWriterOverlapMaterializedScan/iterations:1/repeats:5/manual_time_stddev    2827611 ns      3518287 ns            5 bytes_per_second=107.39Mi/s items_per_second=970.749k/s operations=874.65u ops_per_second=970.749k/s write_lock_acquisitions=41.65u write_lock_wait_ns=2.12882M writer_p50_us=0.0186735 writer_p95_us=0.342093 writer_p99_us=0.441349
+TinyLSM/SnapshotWriterOverlapMaterializedScan/iterations:1/repeats:5/manual_time_cv          17.64 %          2.28 %             5 bytes_per_second=14.52% items_per_second=14.52% operations=0.00% ops_per_second=14.52% write_lock_acquisitions=0.00% write_lock_wait_ns=42.70% writer_p50_us=1.27% writer_p95_us=18.88% writer_p99_us=18.48%
+TinyLSM/SnapshotIterator1000K/iterations:1/repeats:5/manual_time_mean                   1147384478 ns   2743912207 ns            5 bytes_per_second=964.188Mi/s first_result_ns=54.4947M items_per_second=8.71573M/s operations=10M ops_per_second=8.71573M/s peak_rss_kb=646.688k snapshot_sequence=1M
+TinyLSM/SnapshotIterator1000K/iterations:1/repeats:5/manual_time_median                 1144578765 ns   2726239200 ns            5 bytes_per_second=966.523Mi/s first_result_ns=54.0335M items_per_second=8.73684M/s operations=10M ops_per_second=8.73684M/s peak_rss_kb=653.664k snapshot_sequence=1M
+TinyLSM/SnapshotIterator1000K/iterations:1/repeats:5/manual_time_stddev                    6909736 ns     46547961 ns            5 bytes_per_second=5.7935Mi/s first_result_ns=2.10541M items_per_second=52.37k/s operations=0.0833 ops_per_second=52.37k/s peak_rss_kb=23.5125k snapshot_sequence=8.33m
+TinyLSM/SnapshotIterator1000K/iterations:1/repeats:5/manual_time_cv                           0.60 %          1.70 %             5 bytes_per_second=0.60% first_result_ns=3.86% items_per_second=0.60% operations=0.00% ops_per_second=0.60% peak_rss_kb=3.64% snapshot_sequence=0.00%
+TinyLSM/SnapshotMaterializedScan10K/iterations:1/repeats:5/manual_time_mean               13150136 ns     28308959 ns            5 bytes_per_second=842.155Mi/s first_result_ns=1.15971M items_per_second=7.61262M/s operations=100k ops_per_second=7.61262M/s peak_rss_kb=584.486k snapshot_sequence=10k
+TinyLSM/SnapshotMaterializedScan10K/iterations:1/repeats:5/manual_time_median             13280599 ns     28432292 ns            5 bytes_per_second=832.991Mi/s first_result_ns=1.17421M items_per_second=7.52978M/s operations=100k ops_per_second=7.52978M/s peak_rss_kb=575.536k snapshot_sequence=10k
+TinyLSM/SnapshotMaterializedScan10K/iterations:1/repeats:5/manual_time_stddev               473524 ns       478057 ns            5 bytes_per_second=31.2595Mi/s first_result_ns=47.9997k items_per_second=282.568k/s operations=833u ops_per_second=282.568k/s peak_rss_kb=12.9881k snapshot_sequence=83.3u
+TinyLSM/SnapshotMaterializedScan10K/iterations:1/repeats:5/manual_time_cv                     3.60 %          1.69 %             5 bytes_per_second=3.71% first_result_ns=4.14% items_per_second=3.71% operations=0.00% ops_per_second=3.71% peak_rss_kb=2.22% snapshot_sequence=0.00%
+TinyLSM/SnapshotRetentionHeld60s/iterations:1/repeats:5/manual_time_mean                  46399344 ns     57247126 ns            5 active_snapshots=1 bytes_per_second=33.3796Mi/s items_per_second=301.733k/s operations=14k ops_per_second=301.733k/s overwrite_generations=6 retained_bytes=1.62405M retained_versions=14.005k
+TinyLSM/SnapshotRetentionHeld60s/iterations:1/repeats:5/manual_time_median                46485988 ns     57216296 ns            5 active_snapshots=1 bytes_per_second=33.3169Mi/s items_per_second=301.166k/s operations=14k ops_per_second=301.166k/s overwrite_generations=6 retained_bytes=1.62405M retained_versions=14.005k
+TinyLSM/SnapshotRetentionHeld60s/iterations:1/repeats:5/manual_time_stddev                  200802 ns       167855 ns            5 active_snapshots=8.33n bytes_per_second=148.15Ki/s items_per_second=1.3078k/s operations=116.62u ops_per_second=1.3078k/s overwrite_generations=49.98n retained_bytes=0.0135283 retained_versions=116.662u
+TinyLSM/SnapshotRetentionHeld60s/iterations:1/repeats:5/manual_time_cv                        0.43 %          0.29 %             5 active_snapshots=0.00% bytes_per_second=0.43% items_per_second=0.43% operations=0.00% ops_per_second=0.43% overwrite_generations=0.00% retained_bytes=0.00% retained_versions=0.00%
+TinyLSM/SnapshotMaterializedScan100K/iterations:1/repeats:5/manual_time_mean             139309356 ns    290262665 ns            5 bytes_per_second=794.929Mi/s first_result_ns=12.2999M items_per_second=7.18572M/s operations=1M ops_per_second=7.18572M/s peak_rss_kb=588.31k snapshot_sequence=100k
+TinyLSM/SnapshotMaterializedScan100K/iterations:1/repeats:5/manual_time_median           140958618 ns    291748875 ns            5 bytes_per_second=784.813Mi/s first_result_ns=12.4509M items_per_second=7.09428M/s operations=1M ops_per_second=7.09428M/s peak_rss_kb=595.892k snapshot_sequence=100k
+TinyLSM/SnapshotMaterializedScan100K/iterations:1/repeats:5/manual_time_stddev             4914348 ns      4477449 ns            5 bytes_per_second=29.206Mi/s first_result_ns=483.19k items_per_second=264.006k/s operations=8.33m ops_per_second=264.006k/s peak_rss_kb=11.7174k snapshot_sequence=833u
+TinyLSM/SnapshotMaterializedScan100K/iterations:1/repeats:5/manual_time_cv                    3.53 %          1.54 %             5 bytes_per_second=3.67% first_result_ns=3.93% items_per_second=3.67% operations=0.00% ops_per_second=3.67% peak_rss_kb=1.99% snapshot_sequence=0.00%
+TinyLSM/SnapshotIterator100K/iterations:1/repeats:5/manual_time_mean                      99812691 ns    251265216 ns            5 bytes_per_second=1.08286Gi/s first_result_ns=3.50361M items_per_second=10.0234M/s operations=1M ops_per_second=10.0234M/s peak_rss_kb=489.422k snapshot_sequence=100k
+TinyLSM/SnapshotIterator100K/iterations:1/repeats:5/manual_time_median                    98913061 ns    251391332 ns            5 bytes_per_second=1.09221Gi/s first_result_ns=3.47176M items_per_second=10.1099M/s operations=1M ops_per_second=10.1099M/s peak_rss_kb=575.536k snapshot_sequence=100k
+TinyLSM/SnapshotIterator100K/iterations:1/repeats:5/manual_time_stddev                     2413661 ns      2222973 ns            5 bytes_per_second=26.6397Mi/s first_result_ns=144.891k items_per_second=240.808k/s operations=8.33m ops_per_second=240.808k/s peak_rss_kb=218.758k snapshot_sequence=833u
+TinyLSM/SnapshotIterator100K/iterations:1/repeats:5/manual_time_cv                            2.42 %          0.88 %             5 bytes_per_second=2.40% first_result_ns=4.14% items_per_second=2.40% operations=0.00% ops_per_second=2.40% peak_rss_kb=44.70% snapshot_sequence=0.00%
+TinyLSM/SnapshotMaterializedScan1000K/iterations:1/repeats:5/manual_time_mean           1517003437 ns   3084556706 ns            5 bytes_per_second=729.439Mi/s first_result_ns=140.984M items_per_second=6.59373M/s operations=10M ops_per_second=6.59373M/s peak_rss_kb=853.32k snapshot_sequence=1M
+TinyLSM/SnapshotMaterializedScan1000K/iterations:1/repeats:5/manual_time_median         1519076502 ns   3082864823 ns            5 bytes_per_second=728.247Mi/s first_result_ns=141.284M items_per_second=6.58295M/s operations=10M ops_per_second=6.58295M/s peak_rss_kb=862.144k snapshot_sequence=1M
+TinyLSM/SnapshotMaterializedScan1000K/iterations:1/repeats:5/manual_time_stddev           27795950 ns     34865727 ns            5 bytes_per_second=13.4676Mi/s first_result_ns=2.78611M items_per_second=121.74k/s operations=0.0833 ops_per_second=121.74k/s peak_rss_kb=18.2483k snapshot_sequence=8.33m
+TinyLSM/SnapshotMaterializedScan1000K/iterations:1/repeats:5/manual_time_cv                   1.83 %          1.13 %             5 bytes_per_second=1.85% first_result_ns=1.98% items_per_second=1.85% operations=0.00% ops_per_second=1.85% peak_rss_kb=2.14% snapshot_sequence=0.00%
+TinyLSM/SnapshotRetentionHeld0s/iterations:1/repeats:5/manual_time_mean                   12084193 ns     10674668 ns            5 active_snapshots=1 bytes_per_second=18.3207Mi/s items_per_second=165.609k/s operations=2k ops_per_second=165.609k/s overwrite_generations=0 retained_bytes=232k retained_versions=2k
+TinyLSM/SnapshotRetentionHeld0s/iterations:1/repeats:5/manual_time_median                 12238362 ns      8327583 ns            5 active_snapshots=1 bytes_per_second=18.0786Mi/s items_per_second=163.421k/s operations=2k ops_per_second=163.421k/s overwrite_generations=0 retained_bytes=232k retained_versions=2k
+TinyLSM/SnapshotRetentionHeld0s/iterations:1/repeats:5/manual_time_stddev                   336306 ns      3300346 ns            5 active_snapshots=8.33n bytes_per_second=526.484Ki/s items_per_second=4.64758k/s operations=16.66u ops_per_second=4.64758k/s overwrite_generations=0 retained_bytes=1.93256m retained_versions=16.66u
+TinyLSM/SnapshotRetentionHeld0s/iterations:1/repeats:5/manual_time_cv                         2.78 %         30.92 %             5 active_snapshots=0.00% bytes_per_second=2.81% items_per_second=2.81% operations=0.00% ops_per_second=2.81% overwrite_generations=0.00% retained_bytes=0.00% retained_versions=0.00%
+	Command being timed: "./run benchmark -- --benchmark_filter=^TinyLSM/Snapshot(MaterializedScan|Iterator|RetentionHeld|RetentionReleased|WriterOverlap) --benchmark_out=/home/tina.guest/tinylsm-goal4-20260908/artifacts/final-run1/snapshot-goal4.json --benchmark_out_format=json --benchmark_report_aggregates_only=true --benchmark_display_aggregates_only=true --benchmark_enable_random_interleaving=true"
+	User time (seconds): 30.93
+	System time (seconds): 4.18
+	Percent of CPU this job got: 99%
+	Elapsed (wall clock) time (h:mm:ss or m:ss): 0:35.37
+	Average shared text size (kbytes): 0
+	Average unshared data size (kbytes): 0
+	Average stack size (kbytes): 0
+	Average total size (kbytes): 0
+	Maximum resident set size (kbytes): 861896
+	Average resident set size (kbytes): 0
+	Major (requiring I/O) page faults: 0
+	Minor (reclaiming a frame) page faults: 2477962
+	Voluntary context switches: 2894
+	Involuntary context switches: 157
+	Swaps: 0
+	File system inputs: 0
+	File system outputs: 3644024
+	Socket messages sent: 0
+	Socket messages received: 0
+	Signals delivered: 0
+	Page size (bytes): 4096
+	Exit status: 0
