@@ -1,0 +1,38 @@
+captured_at_utc=2026-09-09T15:03:42Z
+source_revision=395f5c2ac5af3c00586665bd95670a723da4e27c
+source_status=unavailable-in-exported-snapshot
+source_archive_sha256=efe4ff314be5a3d871c159c1ace94c651da941e2313e62326477b1216a211479
+Linux lima-tinylsm-linux 6.8.0-134-generic #134-Ubuntu SMP PREEMPT_DYNAMIC Fri Jun 26 18:28:11 UTC 2026 aarch64 aarch64 aarch64 GNU/Linux
+PRETTY_NAME="Ubuntu 24.04.4 LTS"
+NAME="Ubuntu"
+VERSION_ID="24.04"
+VERSION="24.04.4 LTS (Noble Numbat)"
+VERSION_CODENAME=noble
+ID=ubuntu
+ID_LIKE=debian
+HOME_URL="https://www.ubuntu.com/"
+SUPPORT_URL="https://help.ubuntu.com/"
+BUG_REPORT_URL="https://bugs.launchpad.net/ubuntu/"
+PRIVACY_POLICY_URL="https://www.ubuntu.com/legal/terms-and-policies/privacy-policy"
+UBUNTU_CODENAME=noble
+LOGO=ubuntu-logo
+logical_cpus=4
+               total        used        free      shared  buff/cache   available
+Mem:           7.7Gi       455Mi       2.9Gi       996Ki       4.6Gi       7.3Gi
+Swap:             0B          0B          0B
+/dev/vda1 ext4   rw,relatime,discard,errors=remount-ro,commit=30
+Filesystem     Type 1K-blocks     Used Available Use% Mounted on
+/dev/vda1      ext4  39535100 20012572  19506144  51% /
+c++ (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0
+Copyright (C) 2023 Free Software Foundation, Inc.
+This is free software; see the source for copying conditions.  There is NO
+warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+
+Ubuntu clang version 18.1.3 (1ubuntu1)
+Target: aarch64-unknown-linux-gnu
+Thread model: posix
+InstalledDir: /usr/bin
+cmake version 3.28.3
+
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+1.11.1

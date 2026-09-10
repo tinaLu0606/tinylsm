@@ -3,7 +3,8 @@
 状态：固定 Linux VM 的 Goals 4–6 两轮 Release benchmark 已完成；38/38 个 case
 均有完整 median，跨两轮 real-time CV 全部不超过 10%。随后完成写入回归修复及 12/12 个
 受影响 case 的两轮定向复测，最大跨轮 CV 为 `9.309%`。本报告同时汇总历史 baseline
-与 Goals 1–3 的可比证据。
+与 Goals 1–3 的可比证据。2026-09-10 补充了优化后与 LevelDB 的同 session 对比，见
+Goal 3 之后的独立小节。
 
 ## 结论摘要
 
@@ -120,6 +121,18 @@ size-tiered 在这个 mixed workload 中约提高 `86–88%` 吞吐、把 point-
 amplification 降低约 `7.7x`，但付出约 `5.54x` 的 write-amplification 代价。
 它证明当前简化策略有价值，不等同于证明 size-tiered 普遍优于 leveled。详情见
 [compaction-design-and-results-2026-09-08.md](compaction-design-and-results-2026-09-08.md)。
+
+### 优化后与 LevelDB 的同 session 对比
+
+上面每个 Goal 的报告都只和 TinyLSM 自己的 before/after 比较；`baseline-2026-09-06.md`
+是唯一同时跑过 TinyLSM 和 LevelDB 的报告，但那是优化前的快照。2026-09-10 用同一套
+baseline harness、在同一个固定 Linux VM 里对当前 revision（含 Goal 1-6 与单操作写入
+回归修复）重新同时跑了两轮 TinyLSM 和 LevelDB。结论不是单一的"快了多少"：随机读命中
+和顺序异步写有真实提升（约 2x / 64-66%），但全量 compaction 和部分并发写场景在这个
+通用 harness 里持平或变慢——已定位到全量 compaction 变慢是因为 harness 的计时边界
+被 Goal 3 新增的后台 compaction 打破（`Compact()` 现在要等后台任务收尾），不是
+compaction 本身变慢。完整数据、方法说明和根因分析见
+[post-optimization-vs-leveldb-2026-09-10.md](post-optimization-vs-leveldb-2026-09-10.md)。
 
 ## Goal 4：Snapshot、Iterator 与 MVCC GC
 

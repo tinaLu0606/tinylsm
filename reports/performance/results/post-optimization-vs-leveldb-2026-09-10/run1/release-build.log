@@ -1,0 +1,16 @@
++ cmake --preset release
+Preset CMake variables:
+
+  BUILD_TESTING:BOOL="FALSE"
+  CMAKE_BUILD_TYPE="Release"
+  CMAKE_EXPORT_COMPILE_COMMANDS:BOOL="TRUE"
+  TINYLSM_BUILD_TOOLS:BOOL="TRUE"
+
+-- Using the multi-header code from /home/tina.guest/tinylsm-post-opt-source/tinylsm/build/release/_deps/nlohmann_json-src/include/
+-- 
+-- 29.3.0
+-- Configuring done (0.2s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/tina.guest/tinylsm-post-opt-source/tinylsm/build/release
++ cmake --build --preset release
+ninja: no work to do.
